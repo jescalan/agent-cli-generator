@@ -1,0 +1,50 @@
+project_name: agent-cli-generator
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: agent-cli-generator
+    binary: agent-cli-generator
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  disable: true
+
+release:
+  draft: false
+
+brews:
+  - repository:
+      owner: jescalan
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/jescalan/agent-cli-generator"
+    description: "Generate agent-first CLIs from OpenAPI specs."
+    license: "MIT"
+    install: |
+      bin.install "agent-cli-generator"
+    test: |
+      system "#{bin}/agent-cli-generator", "help"

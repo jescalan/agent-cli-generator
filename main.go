@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jeff/agent-cli-generator/internal/generator"
+	"github.com/jescalan/agent-cli-generator/internal/generator"
 )
 
 func main() {

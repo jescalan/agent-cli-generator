@@ -57,8 +57,22 @@ Canonical operation IDs remain the source of truth. Aliases are additive: they h
 
 ## Install
 
+Direct install:
+
 ```bash
-go install github.com/jeff/agent-cli-generator@latest
+curl -fsSL https://raw.githubusercontent.com/jescalan/agent-cli-generator/main/scripts/install.sh | sh
+```
+
+Homebrew:
+
+```bash
+brew install jescalan/tap/agent-cli-generator
+```
+
+Or install from Go:
+
+```bash
+go install github.com/jescalan/agent-cli-generator@latest
 ```
 
 Or build from source:
@@ -66,6 +80,8 @@ Or build from source:
 ```bash
 go build .
 ```
+
+This repo also includes `.goreleaser.yaml`, `.github/workflows/release.yml`, and [RELEASING.md](RELEASING.md), so the generator itself ships the same release shape it generates for other APIs.
 
 ## Generator usage
 
@@ -162,6 +178,8 @@ The message to your users should be simple:
 5. Use `<cli> call --dry-run` before mutating requests.
 
 In other words, your users should not need to read the raw OpenAPI spec. The generated CLI and skills should become the agent-facing contract.
+
+The generator itself now follows that same distribution model: direct install script first, Homebrew on macOS, and Go only as a fallback.
 
 If you want to hand your own users a copy-paste onboarding path, the generated project already contains it:
 

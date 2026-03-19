@@ -1,4 +1,4 @@
-module github.com/jeff/agent-cli-generator
+module github.com/jescalan/agent-cli-generator
 
 go 1.25.1
 
