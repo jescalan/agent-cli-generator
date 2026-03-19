@@ -1,0 +1,3269 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"embed"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/getkin/kin-openapi/openapi3"
+)
+
+const (
+	cliName                 = "{{ .Manifest.Name }}"
+	baseURLEnv              = "{{ .Manifest.EnvPrefix }}_BASE_URL"
+	headersEnv              = "{{ .Manifest.EnvPrefix }}_HEADERS_JSON"
+	overridesEnv            = "{{ .Manifest.EnvPrefix }}_OVERRIDES_JSON"
+	maxResponseBytesEnv     = "{{ .Manifest.EnvPrefix }}_MAX_RESPONSE_BYTES"
+	defaultMaxResponseBytes = 20 << 20
+)
+
+//go:embed openapi.json manifest.json
+var embeddedFiles embed.FS
+
+var (
+	manifestOnce sync.Once
+	manifestData Manifest
+	manifestErr  error
+
+	operationIndexOnce sync.Once
+	operationIndexData map[string]OperationManifest
+	operationIndexErr  error
+
+	docOnce sync.Once
+	docData *openapi3.T
+	docErr  error
+
+	overridesOnce sync.Once
+	overridesData RuntimeOverrides
+	overridesErr  error
+
+	authTokenCacheMu sync.Mutex
+	authTokenCache   = map[string]cachedAccessToken{}
+)
+
+type cliError struct {
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+	Details  any    `json:"details,omitempty"`
+	ExitCode int    `json:"-"`
+}
+
+func (e *cliError) Error() string {
+	return e.Message
+}
+
+type Manifest struct {
+	Name           string              `json:"name"`
+	Title          string              `json:"title"`
+	Version        string              `json:"version"`
+	Description    string              `json:"description,omitempty"`
+	ServerTemplate string              `json:"serverTemplate,omitempty"`
+	DefaultServer  string              `json:"defaultServer,omitempty"`
+	RelativeServer bool                `json:"relativeServer"`
+	ServerVars     []ServerVariable    `json:"serverVariables,omitempty"`
+	GeneratedAt    string              `json:"generatedAt,omitempty"`
+	EnvPrefix      string              `json:"envPrefix"`
+	Env            EnvConfig           `json:"env"`
+	Auth           []AuthScheme        `json:"auth"`
+	Operations     []OperationManifest `json:"operations"`
+}
+
+type EnvConfig struct {
+	BaseURL       string `json:"baseUrl"`
+	HeadersJSON   string `json:"headersJson"`
+	OverridesJSON string `json:"overridesJson"`
+}
+
+type ServerVariable struct {
+	Name        string `json:"name"`
+	EnvVar      string `json:"envVar"`
+	Default     string `json:"default,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type AuthScheme struct {
+	Name              string                   `json:"name"`
+	Type              string                   `json:"type"`
+	Scheme            string                   `json:"scheme,omitempty"`
+	In                string                   `json:"in,omitempty"`
+	HeaderName        string                   `json:"headerName,omitempty"`
+	CookieName        string                   `json:"cookieName,omitempty"`
+	QueryName         string                   `json:"queryName,omitempty"`
+	Description       string                   `json:"description,omitempty"`
+	EnvVar            string                   `json:"envVar"`
+	ClientCredentials *ClientCredentialsConfig `json:"clientCredentials,omitempty"`
+}
+
+type OperationManifest struct {
+	ID             string                `json:"id"`
+	Aliases        []string              `json:"aliases,omitempty"`
+	Method         string                `json:"method"`
+	Path           string                `json:"path"`
+	Summary        string                `json:"summary,omitempty"`
+	Description    string                `json:"description,omitempty"`
+	Tags           []string              `json:"tags,omitempty"`
+	Security       []map[string][]string `json:"security,omitempty"`
+	RequiredScopes []string              `json:"requiredScopes,omitempty"`
+	Pagination     *PaginationManifest   `json:"pagination,omitempty"`
+}
+
+type PaginationManifest struct {
+	RequestParam string `json:"requestParam,omitempty"`
+	ResponsePath string `json:"responsePath,omitempty"`
+	ItemsPath    string `json:"itemsPath,omitempty"`
+}
+
+type ClientCredentialsConfig struct {
+	TokenURL        string   `json:"tokenUrl,omitempty"`
+	TokenURLEnv     string   `json:"tokenUrlEnv,omitempty"`
+	ClientIDEnv     string   `json:"clientIdEnv,omitempty"`
+	ClientSecretEnv string   `json:"clientSecretEnv,omitempty"`
+	AudienceEnv     string   `json:"audienceEnv,omitempty"`
+	ScopesEnv       string   `json:"scopesEnv,omitempty"`
+	AvailableScopes []string `json:"availableScopes,omitempty"`
+}
+
+type RuntimeOverrides struct {
+	Auth       OverrideAuth                 `json:"auth,omitempty"`
+	Operations map[string]OperationOverride `json:"operations,omitempty"`
+}
+
+type OverrideAuth struct {
+	Headers []AuthValueOverride `json:"headers,omitempty"`
+	Query   []AuthValueOverride `json:"query,omitempty"`
+	Cookies []AuthValueOverride `json:"cookies,omitempty"`
+}
+
+type AuthValueOverride struct {
+	Name        string `json:"name"`
+	Env         string `json:"env,omitempty"`
+	Value       string `json:"value,omitempty"`
+	Prefix      string `json:"prefix,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+	Secret      bool   `json:"secret,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type OperationOverride struct {
+	Auth         OverrideAuth             `json:"auth,omitempty"`
+	Requirements []ConditionalRequirement `json:"requirements,omitempty"`
+}
+
+type ConditionalRequirement struct {
+	When    []InputCondition `json:"when,omitempty"`
+	Require []InputTarget    `json:"require,omitempty"`
+	Message string           `json:"message,omitempty"`
+}
+
+type InputCondition struct {
+	Location string `json:"location"`
+	Name     string `json:"name"`
+	Equals   any    `json:"equals,omitempty"`
+	OneOf    []any  `json:"oneOf,omitempty"`
+	Exists   *bool  `json:"exists,omitempty"`
+}
+
+type InputTarget struct {
+	Location string `json:"location"`
+	Name     string `json:"name"`
+}
+
+type preparedRequest struct {
+	URL         string
+	MaskedURL   string
+	Method      string
+	Headers     http.Header
+	Masked      map[string][]string
+	Cookies     []*http.Cookie
+	BodyBytes   []byte
+	BodyValue   any
+	ContentType string
+	Auth        map[string]ResolvedAuth
+}
+
+type ResolvedAuth struct {
+	Name          string
+	Source        string
+	BearerToken   string
+	GrantedScopes []string
+	KnownScopes   bool
+}
+
+type cachedAccessToken struct {
+	Token         string
+	GrantedScopes []string
+	ExpiresAt     time.Time
+}
+
+type resolvedParams struct {
+	Path   map[string]any
+	Query  map[string]any
+	Header map[string]any
+	Cookie map[string]any
+}
+
+// Command dispatch and top-level subcommands.
+func run(args []string) error {
+	if len(args) == 0 {
+		return cmdHelp()
+	}
+
+	switch args[0] {
+	case "help", "-h", "--help":
+		return cmdHelp()
+	case "version", "--version", "-v":
+		manifest, err := loadManifest()
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{
+			"name":    cliName,
+			"version": manifest.Version,
+		})
+	case "operations":
+		return cmdOperations(args[1:])
+	case "schema":
+		return cmdSchema(args[1:])
+	case "example":
+		return cmdExample(args[1:])
+	case "call":
+		return cmdCall(args[1:])
+	case "auth":
+		return cmdAuth()
+	case "spec":
+		return cmdSpec()
+	default:
+		return &cliError{
+			Code:     "unknown_command",
+			Message:  fmt.Sprintf("unknown command %q", args[0]),
+			ExitCode: 2,
+		}
+	}
+}
+
+func cmdHelp() error {
+	manifest, err := loadManifest()
+	if err != nil {
+		return err
+	}
+
+	return printJSON(map[string]any{
+		"name":        manifest.Name,
+		"title":       manifest.Title,
+		"version":     manifest.Version,
+		"description": manifest.Description,
+		"commands": []map[string]any{
+			{
+				"name":        "operations",
+				"description": "List supported operation IDs and aliases.",
+			},
+			{
+				"name":        "schema <operation-id-or-alias>",
+				"description": "Print resolved request and response schema information.",
+			},
+			{
+				"name":        "example <operation-id-or-alias> --kind body|params|response",
+				"description": "Synthesize example JSON from the embedded schemas.",
+			},
+			{
+				"name":        "call <operation-id-or-alias> --params '{...}' --body '{...}'",
+				"description": "Validate and execute an API request.",
+			},
+			{
+				"name":        "auth",
+				"description": "Show auth schemes and expected environment variables.",
+			},
+			{
+				"name":        "spec",
+				"description": "Print the embedded OpenAPI document.",
+			},
+		},
+		"environment": map[string]any{
+			"baseUrl":         manifest.Env.BaseURL,
+			"headersJson":     manifest.Env.HeadersJSON,
+			"overridesJson":   manifest.Env.OverridesJSON,
+			"serverVariables": manifest.ServerVars,
+		},
+		"_meta": map[string]any{
+			"generatedAt":    manifest.GeneratedAt,
+			"operationCount": len(manifest.Operations),
+		},
+	})
+}
+
+func cmdOperations(args []string) error {
+	fs := newFlagSet("operations")
+	filter := fs.String("filter", "", "")
+	if err := fs.Parse(args); err != nil {
+		return flagError(err)
+	}
+
+	manifest, err := loadManifest()
+	if err != nil {
+		return err
+	}
+
+	filtered := make([]OperationManifest, 0, len(manifest.Operations))
+	for _, op := range manifest.Operations {
+		if matchesFilter(op, *filter) {
+			filtered = append(filtered, op)
+		}
+	}
+
+	return printJSON(map[string]any{
+		"operations": filtered,
+		"_meta": map[string]any{
+			"count": len(filtered),
+		},
+	})
+}
+
+func cmdSchema(args []string) error {
+	if len(args) == 0 {
+		return &cliError{
+			Code:     "missing_operation",
+			Message:  "schema requires an operation ID or alias",
+			ExitCode: 2,
+		}
+	}
+
+	manifest, pathItem, operation, err := resolveOperation(args[0])
+	if err != nil {
+		return err
+	}
+
+	parameters := map[string]map[string]any{
+		"path":   {},
+		"query":  {},
+		"header": {},
+		"cookie": {},
+	}
+	for _, paramRef := range collectParameters(pathItem, operation) {
+		if paramRef == nil || paramRef.Value == nil {
+			continue
+		}
+		param := paramRef.Value
+		location := param.In
+		if _, ok := parameters[location]; !ok {
+			parameters[location] = map[string]any{}
+		}
+		parameters[location][param.Name] = map[string]any{
+			"required":    param.Required,
+			"description": strings.TrimSpace(param.Description),
+			"schema":      schemaRefShape(param.Schema, 4, map[string]bool{}),
+			"example":     firstValue(param.Example, exampleFromSchemaRef(param.Schema, 4, map[string]bool{})),
+		}
+	}
+
+	requestBody := requestBodyShape(operation)
+	responses := map[string]any{}
+	if operation.Responses != nil {
+		statuses := sortedResponseCodes(operation.Responses)
+		for _, code := range statuses {
+			responseRef := operation.Responses.Map()[code]
+			if responseRef == nil || responseRef.Value == nil {
+				continue
+			}
+			response := responseRef.Value
+			responses[code] = map[string]any{
+				"description": strings.TrimSpace(derefString(response.Description)),
+				"content":     contentShape(response.Content),
+			}
+		}
+	}
+
+	return printJSON(map[string]any{
+		"operation":   manifest,
+		"parameters":  parameters,
+		"requestBody": requestBody,
+		"responses":   responses,
+		"examples": map[string]any{
+			"params":   paramsExample(pathItem, operation),
+			"body":     bodyExample(operation),
+			"response": responseExample(operation),
+		},
+	})
+}
+
+func cmdExample(args []string) error {
+	if len(args) == 0 {
+		return &cliError{
+			Code:     "missing_operation",
+			Message:  "example requires an operation ID or alias",
+			ExitCode: 2,
+		}
+	}
+
+	fs := newFlagSet("example")
+	kind := fs.String("kind", "body", "")
+	if err := fs.Parse(args[1:]); err != nil {
+		return flagError(err)
+	}
+
+	manifest, pathItem, operation, err := resolveOperation(args[0])
+	if err != nil {
+		return err
+	}
+
+	var result any
+	switch *kind {
+	case "body":
+		result = bodyExample(operation)
+	case "params":
+		result = paramsExample(pathItem, operation)
+	case "response":
+		result = responseExample(operation)
+	default:
+		return &cliError{
+			Code:     "invalid_kind",
+			Message:  fmt.Sprintf("unsupported example kind %q", *kind),
+			ExitCode: 2,
+		}
+	}
+
+	return printJSON(map[string]any{
+		"result": result,
+		"_meta": map[string]any{
+			"operation": manifest.ID,
+			"kind":      *kind,
+		},
+	})
+}
+
+func cmdAuth() error {
+	manifest, err := loadManifest()
+	if err != nil {
+		return err
+	}
+	overrides, err := loadOverrides()
+	if err != nil {
+		return err
+	}
+
+	status := make([]map[string]any, 0, len(manifest.Auth))
+	for _, scheme := range manifest.Auth {
+		_, present := os.LookupEnv(scheme.EnvVar)
+		status = append(status, map[string]any{
+			"name":              scheme.Name,
+			"type":              scheme.Type,
+			"in":                scheme.In,
+			"headerName":        scheme.HeaderName,
+			"cookieName":        scheme.CookieName,
+			"queryName":         scheme.QueryName,
+			"envVar":            scheme.EnvVar,
+			"configured":        present,
+			"description":       scheme.Description,
+			"clientCredentials": clientCredentialsStatus(scheme),
+		})
+	}
+
+	return printJSON(map[string]any{
+		"baseUrlEnv":       manifest.Env.BaseURL,
+		"headersJsonEnv":   manifest.Env.HeadersJSON,
+		"overridesJsonEnv": manifest.Env.OverridesJSON,
+		"serverVariables":  manifest.ServerVars,
+		"schemes":          status,
+		"overrides": map[string]any{
+			"configured": runtimeOverridesConfigured(overrides),
+			"auth":       overrideAuthStatus(overrides.Auth),
+			"operations": operationOverrideStatus(overrides),
+		},
+	})
+}
+
+func clientCredentialsStatus(scheme AuthScheme) map[string]any {
+	if scheme.ClientCredentials == nil {
+		return nil
+	}
+	config := scheme.ClientCredentials
+	tokenURL := strings.TrimSpace(config.TokenURL)
+	if env := strings.TrimSpace(os.Getenv(config.TokenURLEnv)); env != "" {
+		tokenURL = env
+	}
+	_, tokenPresent := os.LookupEnv(scheme.EnvVar)
+	_, clientIDPresent := os.LookupEnv(config.ClientIDEnv)
+	_, clientSecretPresent := os.LookupEnv(config.ClientSecretEnv)
+	_, audiencePresent := os.LookupEnv(config.AudienceEnv)
+	_, scopesPresent := os.LookupEnv(config.ScopesEnv)
+
+	return map[string]any{
+		"supported":           true,
+		"tokenConfigured":     tokenPresent,
+		"tokenUrl":            tokenURL,
+		"tokenUrlEnv":         config.TokenURLEnv,
+		"clientIdEnv":         config.ClientIDEnv,
+		"clientIdPresent":     clientIDPresent,
+		"clientSecretEnv":     config.ClientSecretEnv,
+		"clientSecretPresent": clientSecretPresent,
+		"audienceEnv":         config.AudienceEnv,
+		"audiencePresent":     audiencePresent,
+		"scopesEnv":           config.ScopesEnv,
+		"scopesPresent":       scopesPresent,
+		"availableScopes":     config.AvailableScopes,
+		"enabled":             tokenPresent || (tokenURL != "" && clientIDPresent && clientSecretPresent),
+	}
+}
+
+func cmdSpec() error {
+	data, err := embeddedFiles.ReadFile("openapi.json")
+	if err != nil {
+		return &cliError{
+			Code:     "read_spec_failed",
+			Message:  "failed to read embedded OpenAPI spec",
+			Details:  err.Error(),
+			ExitCode: 1,
+		}
+	}
+	fmt.Println(string(data))
+	return nil
+}
+
+func cmdCall(args []string) error {
+	if len(args) == 0 {
+		return &cliError{
+			Code:     "missing_operation",
+			Message:  "call requires an operation ID or alias",
+			ExitCode: 2,
+		}
+	}
+
+	fs := newFlagSet("call")
+	baseURL := fs.String("base-url", "", "")
+	paramsText := fs.String("params", "{}", "")
+	bodyText := fs.String("body", "", "")
+	bodyFile := fs.String("body-file", "", "")
+	headersText := fs.String("headers", "", "")
+	dryRun := fs.Bool("dry-run", false, "")
+	pageAll := fs.Bool("page-all", false, "")
+	pageLimit := fs.Int("page-limit", 50, "")
+	pageDelayMS := fs.Int("page-delay-ms", 0, "")
+	timeout := fs.Duration("timeout", 30*time.Second, "")
+	if err := fs.Parse(args[1:]); err != nil {
+		return flagError(err)
+	}
+
+	manifest, pathItem, operation, err := resolveOperation(args[0])
+	if err != nil {
+		return err
+	}
+	overrides, err := loadOverrides()
+	if err != nil {
+		return err
+	}
+
+	params, err := parseJSONObject(*paramsText)
+	if err != nil {
+		return err
+	}
+	resolvedParams, err := resolveParamsInput(pathItem, operation, params)
+	if err != nil {
+		return err
+	}
+	headers, err := parseJSONObjectWithOptionalEnv(headersEnv, *headersText)
+	if err != nil {
+		return err
+	}
+	bodyValue, bodyBytes, err := parseBody(*bodyText, *bodyFile, operation)
+	if err != nil {
+		return err
+	}
+
+	if err := validateInputs(pathItem, operation, resolvedParams, bodyValue); err != nil {
+		return err
+	}
+	if err := validateOverrideRequirements(manifest, overrides, resolvedParams, headers, bodyValue); err != nil {
+		return err
+	}
+
+	request, err := prepareRequest(manifest, operation, resolvedParams, headers, bodyValue, bodyBytes, *baseURL, overrides)
+	if err != nil {
+		return err
+	}
+
+	if *dryRun {
+		return printJSON(map[string]any{
+			"request": map[string]any{
+				"operation": manifest.ID,
+				"method":    request.Method,
+				"url":       request.MaskedURL,
+				"headers":   request.Masked,
+				"body":      request.BodyValue,
+			},
+			"_meta": map[string]any{
+				"dryRun": true,
+			},
+		})
+	}
+
+	client := &http.Client{Timeout: *timeout}
+	if *pageAll {
+		if manifest.Pagination == nil || manifest.Pagination.RequestParam == "" || manifest.Pagination.ResponsePath == "" {
+			return &cliError{
+				Code:     "pagination_not_supported",
+				Message:  "this operation does not expose an auto-detected pagination contract",
+				ExitCode: 2,
+			}
+		}
+		return executePaginated(client, manifest, params, headers, bodyValue, bodyBytes, *baseURL, overrides, *pageLimit, time.Duration(*pageDelayMS)*time.Millisecond)
+	}
+
+	if err := validateAuthRequirements(manifest, request, overrides); err != nil {
+		return err
+	}
+
+	result, err := executeOnce(client, manifest, request)
+	if err != nil {
+		return err
+	}
+	return printJSON(result)
+}
+
+func prepareRequest(manifest OperationManifest, operation *openapi3.Operation, params *resolvedParams, headers map[string]any, bodyValue any, bodyBytes []byte, explicitBaseURL string, overrides RuntimeOverrides) (*preparedRequest, error) {
+	rootManifest, err := loadManifest()
+	if err != nil {
+		return nil, err
+	}
+
+	urlPath := manifest.Path
+	queryValues := url.Values{}
+	requestHeaders := http.Header{}
+	maskedHeaders := map[string][]string{}
+	cookies := []*http.Cookie{}
+
+	if params == nil {
+		params = newResolvedParams()
+	}
+
+	for key, value := range params.Path {
+		if value == nil {
+			return nil, &cliError{
+				Code:     "missing_path_parameter",
+				Message:  fmt.Sprintf("path parameter %q cannot be null", key),
+				ExitCode: 2,
+			}
+		}
+		urlPath = strings.ReplaceAll(urlPath, "{"+key+"}", url.PathEscape(stringValue(value)))
+	}
+	for key, value := range params.Query {
+		applyQueryValue(queryValues, key, value)
+	}
+	for key, value := range params.Header {
+		requestHeaders.Set(key, stringValue(value))
+	}
+	for key, value := range params.Cookie {
+		cookies = append(cookies, &http.Cookie{Name: key, Value: stringValue(value)})
+	}
+
+	for key, value := range headers {
+		switch converted := value.(type) {
+		case []any:
+			for _, item := range converted {
+				requestHeaders.Add(key, stringValue(item))
+			}
+		default:
+			requestHeaders.Set(key, stringValue(converted))
+		}
+	}
+
+	maskedQueryKeys := map[string]bool{}
+	authState, err := applyAuth(manifest, rootManifest.Auth, requestHeaders, queryValues, &cookies, maskedHeaders, maskedQueryKeys)
+	if err != nil {
+		return nil, err
+	}
+	applyOverrideAuth(mergedOverrideAuth(overrides.Auth, mergedOperationOverride(manifest, overrides).Auth), requestHeaders, queryValues, &cookies, maskedHeaders, maskedQueryKeys)
+
+	base, err := resolveBaseURL(rootManifest, explicitBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	fullURL, err := joinBaseURL(base, urlPath, queryValues)
+	if err != nil {
+		return nil, err
+	}
+	maskedURL, err := joinBaseURL(base, urlPath, maskedQueryValues(queryValues, maskedQueryKeys))
+	if err != nil {
+		return nil, err
+	}
+
+	contentType := requestContentType(operation)
+	if contentType != "" && requestHeaders.Get("Content-Type") == "" && bodyBytes != nil {
+		requestHeaders.Set("Content-Type", contentType)
+	}
+
+	masked := cloneHeader(requestHeaders)
+	for name := range maskedHeaders {
+		if masked.Get(name) != "" {
+			masked[name] = []string{"***"}
+		}
+	}
+	if len(cookies) > 0 {
+		values := make([]string, 0, len(cookies))
+		for _, cookie := range cookies {
+			values = append(values, cookie.Name+"=***")
+		}
+		masked["Cookie"] = values
+	}
+
+	return &preparedRequest{
+		URL:         fullURL,
+		MaskedURL:   maskedURL,
+		Method:      manifest.Method,
+		Headers:     requestHeaders,
+		Masked:      headerToMap(masked),
+		Cookies:     cookies,
+		BodyBytes:   bodyBytes,
+		BodyValue:   bodyValue,
+		ContentType: contentType,
+		Auth:        authState,
+	}, nil
+}
+
+func executePaginated(client *http.Client, manifest OperationManifest, params map[string]any, headers map[string]any, bodyValue any, bodyBytes []byte, explicitBaseURL string, overrides RuntimeOverrides, pageLimit int, delay time.Duration) error {
+	if pageLimit <= 0 {
+		pageLimit = 50
+	}
+	currentParams := cloneMap(params)
+
+	for page := 1; page <= pageLimit; page++ {
+		_, pathItem, operation, err := resolveOperation(manifest.ID)
+		if err != nil {
+			return err
+		}
+
+		resolvedParams, err := resolveParamsInput(pathItem, operation, currentParams)
+		if err != nil {
+			return err
+		}
+
+		request, err := prepareRequest(manifest, operation, resolvedParams, headers, bodyValue, bodyBytes, explicitBaseURL, overrides)
+		if err != nil {
+			return err
+		}
+
+		if err := validateAuthRequirements(manifest, request, overrides); err != nil {
+			return err
+		}
+
+		result, err := executeOnce(client, manifest, request)
+		if err != nil {
+			return err
+		}
+
+		blob, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			return &cliError{
+				Code:     "marshal_failed",
+				Message:  "failed to marshal paginated response",
+				Details:  marshalErr.Error(),
+				ExitCode: 1,
+			}
+		}
+		fmt.Println(string(blob))
+
+		body, _ := result["result"]
+		token, ok := jsonPathValue(body, manifest.Pagination.ResponsePath)
+		if !ok || token == nil || stringValue(token) == "" {
+			return nil
+		}
+
+		currentParams = setPaginatedParam(currentParams, manifest.Pagination.RequestParam, token)
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+	}
+
+	return &cliError{
+		Code:    "pagination_truncated",
+		Message: fmt.Sprintf("pagination stopped after reaching page limit %d", pageLimit),
+		Details: map[string]any{
+			"pageLimit": pageLimit,
+		},
+		ExitCode: 2,
+	}
+}
+
+func executeOnce(client *http.Client, manifest OperationManifest, prepared *preparedRequest) (map[string]any, error) {
+	var bodyReader io.Reader
+	if prepared.BodyBytes != nil {
+		bodyReader = bytes.NewReader(prepared.BodyBytes)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), prepared.Method, prepared.URL, bodyReader)
+	if err != nil {
+		return nil, &cliError{
+			Code:     "request_build_failed",
+			Message:  "failed to build HTTP request",
+			Details:  err.Error(),
+			ExitCode: 1,
+		}
+	}
+	req.Header = cloneHeader(prepared.Headers)
+	for _, cookie := range prepared.Cookies {
+		req.AddCookie(cookie)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, &cliError{
+			Code:     "request_failed",
+			Message:  "request failed",
+			Details:  err.Error(),
+			ExitCode: 1,
+		}
+	}
+	defer resp.Body.Close()
+
+	limit := maxResponseBytes()
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
+	if err != nil {
+		return nil, &cliError{
+			Code:     "read_response_failed",
+			Message:  "failed to read response body",
+			Details:  err.Error(),
+			ExitCode: 1,
+		}
+	}
+	if len(bodyBytes) > limit {
+		return nil, &cliError{
+			Code:     "response_too_large",
+			Message:  fmt.Sprintf("response body exceeded limit of %d bytes", limit),
+			ExitCode: 1,
+		}
+	}
+
+	parsedBody := parseResponseBody(bodyBytes, resp.Header.Get("Content-Type"))
+	result := map[string]any{
+		"result": parsedBody,
+		"_meta": map[string]any{
+			"operation": manifest.ID,
+			"status":    resp.StatusCode,
+			"headers":   headerToMap(resp.Header),
+		},
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &cliError{
+			Code:     "http_error",
+			Message:  fmt.Sprintf("request failed with status %d", resp.StatusCode),
+			Details:  result,
+			ExitCode: 1,
+		}
+	}
+
+	return result, nil
+}
+
+func validateInputs(pathItem *openapi3.PathItem, operation *openapi3.Operation, params *resolvedParams, bodyValue any) error {
+	paramIndex := parameterIndexByLocation(pathItem, operation)
+	var problems []string
+	if params == nil {
+		params = newResolvedParams()
+	}
+
+	for location, definitions := range paramIndex {
+		for name, definition := range definitions {
+			if definition == nil || definition.Value == nil {
+				continue
+			}
+			if definition.Value.Required {
+				if _, ok := paramsByLocation(params, location)[name]; !ok {
+					problems = append(problems, fmt.Sprintf("missing required %s parameter %q", location, name))
+				}
+			}
+		}
+	}
+
+	for location, values := range params.all() {
+		definitions := paramIndex[location]
+		for name, value := range values {
+			definition, ok := definitions[name]
+			if !ok || definition == nil || definition.Value == nil {
+				problems = append(problems, fmt.Sprintf("unknown %s parameter %q", location, name))
+				continue
+			}
+			if definition.Value.Schema != nil && definition.Value.Schema.Value != nil {
+				if err := definition.Value.Schema.Value.VisitJSON(value, openapi3.MultiErrors()); err != nil {
+					problems = append(problems, fmt.Sprintf("%s parameter %q failed validation: %s", location, name, normalizeValidationError(err)))
+				}
+			}
+		}
+	}
+
+	if operation != nil && operation.RequestBody != nil && operation.RequestBody.Value != nil {
+		required := operation.RequestBody.Value.Required
+		schema := bodySchemaForValidation(operation)
+		if required && bodyValue == nil {
+			problems = append(problems, "request body is required")
+		}
+		if bodyValue != nil && schema != nil && schema.Value != nil {
+			if err := schema.Value.VisitJSON(bodyValue, openapi3.MultiErrors()); err != nil {
+				problems = append(problems, "request body failed validation: "+normalizeValidationError(err))
+			}
+		}
+	}
+
+	if len(problems) == 0 {
+		return nil
+	}
+
+	return &cliError{
+		Code:     "validation_failed",
+		Message:  "request validation failed",
+		Details:  problems,
+		ExitCode: 2,
+	}
+}
+
+// Schema inspection and example synthesis.
+func requestBodyShape(operation *openapi3.Operation) any {
+	if operation == nil || operation.RequestBody == nil || operation.RequestBody.Value == nil {
+		return nil
+	}
+
+	body := operation.RequestBody.Value
+	return map[string]any{
+		"required": body.Required,
+		"content":  contentShape(body.Content),
+	}
+}
+
+func contentShape(content openapi3.Content) any {
+	if content == nil {
+		return nil
+	}
+
+	types := make([]string, 0, len(content))
+	for contentType := range content {
+		types = append(types, contentType)
+	}
+	sort.Strings(types)
+
+	payload := map[string]any{}
+	for _, contentType := range types {
+		media := content[contentType]
+		if media == nil {
+			continue
+		}
+		payload[contentType] = map[string]any{
+			"schema":  schemaRefShape(media.Schema, 4, map[string]bool{}),
+			"example": firstValue(media.Example, exampleFromSchemaRef(media.Schema, 4, map[string]bool{})),
+		}
+	}
+	return payload
+}
+
+func paramsExample(pathItem *openapi3.PathItem, operation *openapi3.Operation) map[string]any {
+	type candidate struct {
+		Name     string
+		Param    *openapi3.Parameter
+		Example  any
+		Priority int
+		Index    int
+	}
+
+	buckets := map[string][]candidate{}
+	for _, paramRef := range collectParameters(pathItem, operation) {
+		if paramRef == nil || paramRef.Value == nil {
+			continue
+		}
+		param := paramRef.Value
+		location := param.In
+		if location == "" {
+			location = "query"
+		}
+		example := firstValue(param.Example, exampleFromSchemaRef(param.Schema, 3, map[string]bool{}))
+		buckets[location] = append(buckets[location], candidate{
+			Name:     param.Name,
+			Param:    param,
+			Example:  example,
+			Priority: parameterExamplePriority(param, example),
+			Index:    len(buckets[location]),
+		})
+	}
+
+	out := map[string]any{}
+	for location, entries := range buckets {
+		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].Priority != entries[j].Priority {
+				return entries[i].Priority > entries[j].Priority
+			}
+			return entries[i].Index < entries[j].Index
+		})
+
+		bucket := map[string]any{}
+		included := 0
+		for _, entry := range entries {
+			if !entry.Param.Required && included >= 6 {
+				continue
+			}
+			bucket[entry.Name] = entry.Example
+			included++
+		}
+		out[location] = bucket
+	}
+	return out
+}
+
+func parameterExamplePriority(param *openapi3.Parameter, example any) int {
+	if param == nil {
+		return 0
+	}
+
+	score := 0
+	if param.Required {
+		score += 100
+	}
+	if example != nil {
+		score += 50
+	}
+	if param.Schema != nil && param.Schema.Value != nil {
+		if param.Schema.Value.Default != nil {
+			score += 40
+		}
+		if len(param.Schema.Value.Enum) > 0 {
+			score += 20
+		}
+	}
+
+	switch strings.ToLower(param.Name) {
+	case "limit", "offset", "page", "page_size", "pagesize", "page_token", "pagetoken", "cursor", "after", "before", "starting_after", "startingafter", "ending_before", "endingbefore", "order_by", "sort":
+		score += 30
+	}
+
+	if !param.Deprecated {
+		score += 10
+	}
+	return score
+}
+
+func bodyExample(operation *openapi3.Operation) any {
+	if operation == nil || operation.RequestBody == nil || operation.RequestBody.Value == nil {
+		return nil
+	}
+	schema := firstJSONContentSchema(operation.RequestBody.Value.Content)
+	if hasPostgRESTContent(operation.RequestBody.Value.Content) {
+		return exampleFromPostgRESTInputSchema(schema, 5, map[string]bool{})
+	}
+	return exampleFromSchemaRef(schema, 5, map[string]bool{})
+}
+
+func responseExample(operation *openapi3.Operation) any {
+	return exampleFromSchemaRef(firstSuccessJSONSchema(operation), 5, map[string]bool{})
+}
+
+func schemaRefShape(ref *openapi3.SchemaRef, depth int, seen map[string]bool) any {
+	if ref == nil {
+		return nil
+	}
+	if depth <= 0 {
+		if ref.Ref != "" {
+			return map[string]any{"$ref": ref.Ref}
+		}
+		return nil
+	}
+	if ref.Ref != "" {
+		if seen[ref.Ref] {
+			return map[string]any{"$ref": ref.Ref}
+		}
+		seen[ref.Ref] = true
+		defer delete(seen, ref.Ref)
+	}
+	if ref.Value == nil {
+		if ref.Ref != "" {
+			return map[string]any{"$ref": ref.Ref}
+		}
+		return nil
+	}
+
+	schema := ref.Value
+	out := map[string]any{}
+	if ref.Ref != "" {
+		out["$ref"] = ref.Ref
+	}
+	if schema.Type != nil {
+		types := append([]string(nil), (*schema.Type)...)
+		if len(types) == 1 {
+			out["type"] = types[0]
+		} else {
+			out["type"] = types
+		}
+	}
+	if schema.Description != "" {
+		out["description"] = schema.Description
+	}
+	if schema.Format != "" {
+		out["format"] = schema.Format
+	}
+	if len(schema.Required) > 0 {
+		out["required"] = schema.Required
+	}
+	if len(schema.Enum) > 0 {
+		out["enum"] = schema.Enum
+	}
+	if schema.Default != nil {
+		out["default"] = schema.Default
+	}
+	if schema.Example != nil {
+		out["example"] = schema.Example
+	}
+	if schema.MinLength > 0 {
+		out["minLength"] = schema.MinLength
+	}
+	if schema.MaxLength != nil {
+		out["maxLength"] = *schema.MaxLength
+	}
+	if schema.Min != nil {
+		out["minimum"] = *schema.Min
+	}
+	if schema.Max != nil {
+		out["maximum"] = *schema.Max
+	}
+	if schema.Items != nil {
+		out["items"] = schemaRefShape(schema.Items, depth-1, seen)
+	}
+	if len(schema.Properties) > 0 {
+		props := map[string]any{}
+		names := make([]string, 0, len(schema.Properties))
+		for name := range schema.Properties {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			props[name] = schemaRefShape(schema.Properties[name], depth-1, seen)
+		}
+		out["properties"] = props
+	}
+	if len(schema.OneOf) > 0 {
+		out["oneOf"] = schemaListShape(schema.OneOf, depth-1, seen)
+	}
+	if len(schema.AnyOf) > 0 {
+		out["anyOf"] = schemaListShape(schema.AnyOf, depth-1, seen)
+	}
+	if len(schema.AllOf) > 0 {
+		out["allOf"] = schemaListShape(schema.AllOf, depth-1, seen)
+	}
+	return out
+}
+
+func schemaListShape(list openapi3.SchemaRefs, depth int, seen map[string]bool) []any {
+	out := make([]any, 0, len(list))
+	for _, entry := range list {
+		out = append(out, schemaRefShape(entry, depth, copySeen(seen)))
+	}
+	return out
+}
+
+func exampleFromSchemaRef(ref *openapi3.SchemaRef, depth int, seen map[string]bool) any {
+	if ref == nil || depth <= 0 {
+		return nil
+	}
+	if ref.Ref != "" {
+		if seen[ref.Ref] {
+			return nil
+		}
+		seen[ref.Ref] = true
+		defer delete(seen, ref.Ref)
+	}
+	if ref.Value == nil {
+		return nil
+	}
+	schema := ref.Value
+	if schema.Example != nil {
+		return schema.Example
+	}
+	if schema.Default != nil {
+		return schema.Default
+	}
+	if len(schema.Enum) > 0 {
+		return schema.Enum[0]
+	}
+	if len(schema.OneOf) > 0 {
+		return exampleFromSchemaRef(schema.OneOf[0], depth-1, seen)
+	}
+	if len(schema.AnyOf) > 0 {
+		return exampleFromSchemaRef(schema.AnyOf[0], depth-1, seen)
+	}
+	if len(schema.AllOf) > 0 {
+		merged := map[string]any{}
+		for _, entry := range schema.AllOf {
+			example := exampleFromSchemaRef(entry, depth-1, copySeen(seen))
+			if obj, ok := example.(map[string]any); ok {
+				for key, value := range obj {
+					merged[key] = value
+				}
+			}
+		}
+		if len(merged) > 0 {
+			return merged
+		}
+	}
+
+	if schemaHasType(schema, "object") || len(schema.Properties) > 0 {
+		obj := map[string]any{}
+		names := make([]string, 0, len(schema.Properties))
+		for name := range schema.Properties {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		required := make(map[string]bool, len(schema.Required))
+		for _, name := range schema.Required {
+			required[name] = true
+		}
+
+		included := 0
+		for _, name := range names {
+			if !required[name] && included >= 3 {
+				continue
+			}
+			obj[name] = exampleFromSchemaRef(schema.Properties[name], depth-1, copySeen(seen))
+			included++
+		}
+		return obj
+	}
+	if schemaHasType(schema, "array") {
+		return []any{exampleFromSchemaRef(schema.Items, depth-1, seen)}
+	}
+	if schemaHasType(schema, "integer") {
+		if schema.Min != nil {
+			return int(*schema.Min)
+		}
+		return 1
+	}
+	if schemaHasType(schema, "number") {
+		if schema.Min != nil {
+			return *schema.Min
+		}
+		return 1.0
+	}
+	if schemaHasType(schema, "boolean") {
+		return true
+	}
+	if schemaHasType(schema, "string") {
+		switch schema.Format {
+		case "uuid":
+			return "11111111-1111-1111-1111-111111111111"
+		case "date-time":
+			return "2026-01-02T15:04:05Z"
+		case "date":
+			return "2026-01-02"
+		case "email":
+			return "agent@example.com"
+		case "uri", "url":
+			return "https://example.com"
+		default:
+			return "string"
+		}
+	}
+	return nil
+}
+
+func bodySchemaForValidation(operation *openapi3.Operation) *openapi3.SchemaRef {
+	if operation == nil || operation.RequestBody == nil || operation.RequestBody.Value == nil {
+		return nil
+	}
+	schema := firstJSONContentSchema(operation.RequestBody.Value.Content)
+	if schema == nil || schema.Value == nil {
+		return schema
+	}
+	if !hasPostgRESTContent(operation.RequestBody.Value.Content) {
+		return schema
+	}
+	return cloneSchemaRefWithoutRequired(schema, map[*openapi3.SchemaRef]*openapi3.SchemaRef{})
+}
+
+func hasPostgRESTContent(content openapi3.Content) bool {
+	for contentType := range content {
+		if strings.HasPrefix(contentType, "application/vnd.pgrst.object+json") {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneSchemaRefWithoutRequired(ref *openapi3.SchemaRef, seen map[*openapi3.SchemaRef]*openapi3.SchemaRef) *openapi3.SchemaRef {
+	if ref == nil {
+		return nil
+	}
+	if cloned, ok := seen[ref]; ok {
+		return cloned
+	}
+
+	clone := &openapi3.SchemaRef{Ref: ref.Ref}
+	seen[ref] = clone
+	if ref.Value == nil {
+		return clone
+	}
+
+	schemaCopy := *ref.Value
+	clone.Value = &schemaCopy
+	schemaCopy.Required = nil
+
+	if ref.Value.Items != nil {
+		schemaCopy.Items = cloneSchemaRefWithoutRequired(ref.Value.Items, seen)
+	}
+	if len(ref.Value.Properties) > 0 {
+		props := make(map[string]*openapi3.SchemaRef, len(ref.Value.Properties))
+		for name, property := range ref.Value.Properties {
+			props[name] = cloneSchemaRefWithoutRequired(property, seen)
+		}
+		schemaCopy.Properties = props
+	}
+	if len(ref.Value.OneOf) > 0 {
+		schemaCopy.OneOf = cloneSchemaRefListWithoutRequired(ref.Value.OneOf, seen)
+	}
+	if len(ref.Value.AnyOf) > 0 {
+		schemaCopy.AnyOf = cloneSchemaRefListWithoutRequired(ref.Value.AnyOf, seen)
+	}
+	if len(ref.Value.AllOf) > 0 {
+		schemaCopy.AllOf = cloneSchemaRefListWithoutRequired(ref.Value.AllOf, seen)
+	}
+	if ref.Value.Not != nil {
+		schemaCopy.Not = cloneSchemaRefWithoutRequired(ref.Value.Not, seen)
+	}
+
+	return clone
+}
+
+func cloneSchemaRefListWithoutRequired(list openapi3.SchemaRefs, seen map[*openapi3.SchemaRef]*openapi3.SchemaRef) openapi3.SchemaRefs {
+	out := make(openapi3.SchemaRefs, 0, len(list))
+	for _, entry := range list {
+		out = append(out, cloneSchemaRefWithoutRequired(entry, seen))
+	}
+	return out
+}
+
+func exampleFromPostgRESTInputSchema(ref *openapi3.SchemaRef, depth int, seen map[string]bool) any {
+	if ref == nil || depth <= 0 {
+		return nil
+	}
+	if ref.Ref != "" {
+		if seen[ref.Ref] {
+			return nil
+		}
+		seen[ref.Ref] = true
+		defer delete(seen, ref.Ref)
+	}
+	if ref.Value == nil {
+		return nil
+	}
+
+	schema := ref.Value
+	if !(schemaHasType(schema, "object") || len(schema.Properties) > 0) {
+		return exampleFromSchemaRef(ref, depth, seen)
+	}
+
+	names := make([]string, 0, len(schema.Properties))
+	for name := range schema.Properties {
+		names = append(names, name)
+	}
+	sort.SliceStable(names, func(i, j int) bool {
+		left := postgRESTPropertyPriority(names[i], schema.Properties[names[i]])
+		right := postgRESTPropertyPriority(names[j], schema.Properties[names[j]])
+		if left != right {
+			return left > right
+		}
+		return names[i] < names[j]
+	})
+
+	obj := map[string]any{}
+	included := 0
+	for _, name := range names {
+		if included >= 4 {
+			break
+		}
+		if postgRESTPropertyPriority(name, schema.Properties[name]) < 0 {
+			continue
+		}
+		example := exampleFromSchemaRef(schema.Properties[name], depth-1, copySeen(seen))
+		if example == nil {
+			continue
+		}
+		obj[name] = example
+		included++
+	}
+	if len(obj) > 0 {
+		return obj
+	}
+	return exampleFromSchemaRef(ref, depth, seen)
+}
+
+func postgRESTPropertyPriority(name string, ref *openapi3.SchemaRef) int {
+	score := 0
+	lowerName := strings.ToLower(name)
+
+	switch lowerName {
+	case "name", "title", "slug", "project_id", "state", "status", "description", "priority", "due_date", "content":
+		score += 80
+	case "id", "created_at", "updated_at", "deleted_at", "inserted_at":
+		score -= 100
+	}
+
+	if ref == nil || ref.Value == nil {
+		return score
+	}
+
+	description := strings.ToLower(ref.Value.Description)
+	if strings.Contains(description, "<fk ") {
+		score += 70
+	}
+	if strings.Contains(description, "<pk/") {
+		score -= 120
+	}
+	if ref.Value.Default != nil {
+		score -= 60
+	}
+	if len(ref.Value.Enum) > 0 {
+		score += 20
+	}
+
+	return score
+}
+
+func parseJSONObject(raw string) (map[string]any, error) {
+	if strings.TrimSpace(raw) == "" {
+		return map[string]any{}, nil
+	}
+
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, &cliError{
+			Code:     "invalid_json",
+			Message:  "failed to parse JSON object",
+			Details:  err.Error(),
+			ExitCode: 2,
+		}
+	}
+	if out == nil {
+		out = map[string]any{}
+	}
+	return out, nil
+}
+
+func parseJSONObjectWithOptionalEnv(envName, raw string) (map[string]any, error) {
+	merged := map[string]any{}
+	if envRaw := strings.TrimSpace(os.Getenv(envName)); envRaw != "" {
+		envValue, err := parseJSONObject(envRaw)
+		if err != nil {
+			return nil, err
+		}
+		for key, value := range envValue {
+			merged[key] = value
+		}
+	}
+	if strings.TrimSpace(raw) == "" {
+		return merged, nil
+	}
+	parsed, err := parseJSONObject(raw)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range parsed {
+		merged[key] = value
+	}
+	return merged, nil
+}
+
+func parseBody(raw, filePath string, operation *openapi3.Operation) (any, []byte, error) {
+	if strings.TrimSpace(raw) != "" && strings.TrimSpace(filePath) != "" {
+		return nil, nil, &cliError{
+			Code:     "conflicting_body_inputs",
+			Message:  "use either --body or --body-file, not both",
+			ExitCode: 2,
+		}
+	}
+
+	bodySource := strings.TrimSpace(raw)
+	if strings.TrimSpace(filePath) != "" {
+		if filePath == "-" {
+			data, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				return nil, nil, &cliError{
+					Code:     "read_stdin_failed",
+					Message:  "failed to read request body from stdin",
+					Details:  err.Error(),
+					ExitCode: 1,
+				}
+			}
+			bodySource = string(data)
+		} else {
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				return nil, nil, &cliError{
+					Code:     "read_body_file_failed",
+					Message:  "failed to read request body file",
+					Details:  err.Error(),
+					ExitCode: 1,
+				}
+			}
+			bodySource = string(data)
+		}
+	}
+
+	if strings.TrimSpace(bodySource) == "" {
+		return nil, nil, nil
+	}
+
+	contentType := requestContentType(operation)
+	if contentType != "" && !strings.Contains(contentType, "json") {
+		return bodySource, []byte(bodySource), nil
+	}
+
+	var value any
+	if err := json.Unmarshal([]byte(bodySource), &value); err != nil {
+		return nil, nil, &cliError{
+			Code:     "invalid_json",
+			Message:  "failed to parse request body JSON",
+			Details:  err.Error(),
+			ExitCode: 2,
+		}
+	}
+
+	return value, []byte(bodySource), nil
+}
+
+// Runtime config, caching, and override loading.
+func runtimeOverridesConfigured(overrides RuntimeOverrides) bool {
+	if len(overrides.Auth.Headers) > 0 || len(overrides.Auth.Query) > 0 || len(overrides.Auth.Cookies) > 0 {
+		return true
+	}
+	return len(overrides.Operations) > 0
+}
+
+func overrideAuthStatus(auth OverrideAuth) map[string]any {
+	return map[string]any{
+		"headers": authValueStatusList(auth.Headers, "header"),
+		"query":   authValueStatusList(auth.Query, "query"),
+		"cookies": authValueStatusList(auth.Cookies, "cookie"),
+	}
+}
+
+func authValueStatusList(entries []AuthValueOverride, location string) []map[string]any {
+	if len(entries) == 0 {
+		return []map[string]any{}
+	}
+	status := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		configured := false
+		source := "literal"
+		if strings.TrimSpace(entry.Env) != "" {
+			configured = strings.TrimSpace(os.Getenv(entry.Env)) != ""
+			source = "env"
+		} else if strings.TrimSpace(entry.Value) != "" {
+			configured = true
+		}
+		status = append(status, map[string]any{
+			"location":    location,
+			"name":        entry.Name,
+			"env":         entry.Env,
+			"required":    entry.Required,
+			"configured":  configured,
+			"secret":      entry.Secret,
+			"description": entry.Description,
+			"source":      source,
+		})
+	}
+	return status
+}
+
+func operationOverrideStatus(overrides RuntimeOverrides) []map[string]any {
+	if len(overrides.Operations) == 0 {
+		return []map[string]any{}
+	}
+	keys := make([]string, 0, len(overrides.Operations))
+	for key := range overrides.Operations {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	status := make([]map[string]any, 0, len(keys))
+	for _, key := range keys {
+		override := overrides.Operations[key]
+		status = append(status, map[string]any{
+			"key":              key,
+			"auth":             overrideAuthStatus(override.Auth),
+			"requirementCount": len(override.Requirements),
+		})
+	}
+	return status
+}
+
+func applyAuth(operation OperationManifest, schemes []AuthScheme, headers http.Header, query url.Values, cookies *[]*http.Cookie, masked map[string][]string, maskedQueryKeys map[string]bool) (map[string]ResolvedAuth, error) {
+	resolved := map[string]ResolvedAuth{}
+	for _, scheme := range schemes {
+		state, value, ok, err := resolveAuthValue(operation, scheme)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		if state.Name == "" {
+			state.Name = scheme.Name
+		}
+		resolved[scheme.Name] = state
+		if value == "" {
+			continue
+		}
+		switch {
+		case scheme.Type == "http" && strings.EqualFold(scheme.Scheme, "basic"):
+			encoded, err := normalizeBasicAuthValue(scheme, value)
+			if err != nil {
+				return nil, err
+			}
+			headers.Set("Authorization", "Basic "+encoded)
+			masked["Authorization"] = []string{"***"}
+		case (scheme.Type == "http" && strings.EqualFold(scheme.Scheme, "bearer")) || scheme.Type == "oauth2":
+			headers.Set("Authorization", "Bearer "+value)
+			masked["Authorization"] = []string{"***"}
+		case scheme.Type == "apiKey" && strings.EqualFold(scheme.In, "header") && scheme.HeaderName != "":
+			headers.Set(scheme.HeaderName, value)
+			masked[scheme.HeaderName] = []string{"***"}
+		case scheme.Type == "apiKey" && strings.EqualFold(scheme.In, "query") && scheme.QueryName != "":
+			query.Set(scheme.QueryName, value)
+			maskedQueryKeys[scheme.QueryName] = true
+		case scheme.Type == "apiKey" && strings.EqualFold(scheme.In, "cookie") && scheme.CookieName != "":
+			*cookies = append(*cookies, &http.Cookie{Name: scheme.CookieName, Value: value})
+		}
+	}
+	return resolved, nil
+}
+
+func normalizeBasicAuthValue(scheme AuthScheme, value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", nil
+	}
+	if strings.Contains(trimmed, ":") {
+		return base64.StdEncoding.EncodeToString([]byte(trimmed)), nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(trimmed)
+	if err == nil && strings.Contains(string(decoded), ":") {
+		return trimmed, nil
+	}
+	return "", &cliError{
+		Code:     "invalid_auth_value",
+		Message:  fmt.Sprintf("invalid basic auth value for %s", scheme.Name),
+		Details:  fmt.Sprintf("set %s to either raw username:password or base64(username:password)", scheme.EnvVar),
+		ExitCode: 2,
+	}
+}
+
+func resolveAuthValue(operation OperationManifest, scheme AuthScheme) (ResolvedAuth, string, bool, error) {
+	if token := strings.TrimSpace(os.Getenv(scheme.EnvVar)); token != "" {
+		return ResolvedAuth{
+			Name:          scheme.Name,
+			Source:        "env:" + scheme.EnvVar,
+			BearerToken:   token,
+			GrantedScopes: tokenScopes(token, nil),
+			KnownScopes:   len(tokenScopes(token, nil)) > 0,
+		}, token, true, nil
+	}
+
+	if scheme.ClientCredentials != nil {
+		token, grantedScopes, ok, err := clientCredentialsToken(scheme, operation.RequiredScopes)
+		if err != nil {
+			return ResolvedAuth{}, "", false, err
+		}
+		if ok {
+			return ResolvedAuth{
+				Name:          scheme.Name,
+				Source:        "client_credentials",
+				BearerToken:   token,
+				GrantedScopes: grantedScopes,
+				KnownScopes:   len(grantedScopes) > 0,
+			}, token, true, nil
+		}
+	}
+
+	return ResolvedAuth{}, "", false, nil
+}
+
+func clientCredentialsToken(scheme AuthScheme, requiredScopes []string) (string, []string, bool, error) {
+	config := scheme.ClientCredentials
+	if config == nil {
+		return "", nil, false, nil
+	}
+
+	tokenURL := strings.TrimSpace(config.TokenURL)
+	if env := strings.TrimSpace(os.Getenv(config.TokenURLEnv)); env != "" {
+		tokenURL = env
+	}
+	clientID := strings.TrimSpace(os.Getenv(config.ClientIDEnv))
+	clientSecret := strings.TrimSpace(os.Getenv(config.ClientSecretEnv))
+	if tokenURL == "" || clientID == "" || clientSecret == "" {
+		return "", nil, false, nil
+	}
+
+	requestedScopes := mergeScopes(requiredScopes, splitScopeString(strings.TrimSpace(os.Getenv(config.ScopesEnv))))
+	audience := strings.TrimSpace(os.Getenv(config.AudienceEnv))
+	cacheKey := scheme.Name + "|" + tokenURL + "|" + clientID + "|" + audience + "|" + strings.Join(requestedScopes, " ")
+	if cached, ok := getCachedAccessToken(cacheKey); ok {
+		return cached.Token, cached.GrantedScopes, true, nil
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "client_credentials")
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	if audience != "" {
+		form.Set("audience", audience)
+	}
+	if len(requestedScopes) > 0 {
+		form.Set("scope", strings.Join(requestedScopes, " "))
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", nil, false, &cliError{
+			Code:     "auth_token_request_failed",
+			Message:  fmt.Sprintf("failed to build client_credentials request for %s", scheme.Name),
+			Details:  err.Error(),
+			ExitCode: 2,
+		}
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", nil, false, &cliError{
+			Code:     "auth_token_request_failed",
+			Message:  fmt.Sprintf("client_credentials request failed for %s", scheme.Name),
+			Details:  err.Error(),
+			ExitCode: 2,
+		}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", nil, false, &cliError{
+			Code:     "auth_token_request_failed",
+			Message:  fmt.Sprintf("failed to read token response for %s", scheme.Name),
+			Details:  err.Error(),
+			ExitCode: 2,
+		}
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", nil, false, &cliError{
+			Code:    "auth_token_request_failed",
+			Message: fmt.Sprintf("client_credentials request returned %d for %s", resp.StatusCode, scheme.Name),
+			Details: map[string]any{
+				"status": resp.StatusCode,
+				"body":   parseMaybeJSON(body),
+			},
+			ExitCode: 2,
+		}
+	}
+
+	var payload struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		Scope       string `json:"scope"`
+		ExpiresIn   int64  `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", nil, false, &cliError{
+			Code:     "auth_token_request_failed",
+			Message:  fmt.Sprintf("token response for %s was not valid JSON", scheme.Name),
+			Details:  err.Error(),
+			ExitCode: 2,
+		}
+	}
+	if strings.TrimSpace(payload.AccessToken) == "" {
+		return "", nil, false, &cliError{
+			Code:     "auth_token_request_failed",
+			Message:  fmt.Sprintf("token response for %s did not include access_token", scheme.Name),
+			Details:  parseMaybeJSON(body),
+			ExitCode: 2,
+		}
+	}
+
+	grantedScopes := tokenScopes(payload.AccessToken, splitScopeString(payload.Scope))
+	if len(grantedScopes) == 0 && len(requestedScopes) > 0 {
+		grantedScopes = append([]string(nil), requestedScopes...)
+	}
+
+	expiresAt := time.Now().Add(50 * time.Minute)
+	if payload.ExpiresIn > 0 {
+		expiresAt = time.Now().Add(time.Duration(payload.ExpiresIn) * time.Second)
+	}
+	setCachedAccessToken(cacheKey, cachedAccessToken{
+		Token:         payload.AccessToken,
+		GrantedScopes: grantedScopes,
+		ExpiresAt:     expiresAt,
+	})
+
+	return payload.AccessToken, grantedScopes, true, nil
+}
+
+func getCachedAccessToken(key string) (cachedAccessToken, bool) {
+	authTokenCacheMu.Lock()
+	defer authTokenCacheMu.Unlock()
+
+	entry, ok := authTokenCache[key]
+	if !ok {
+		return cachedAccessToken{}, false
+	}
+	if !entry.ExpiresAt.IsZero() && time.Now().After(entry.ExpiresAt.Add(-30*time.Second)) {
+		delete(authTokenCache, key)
+		return cachedAccessToken{}, false
+	}
+	return entry, true
+}
+
+func setCachedAccessToken(key string, token cachedAccessToken) {
+	authTokenCacheMu.Lock()
+	defer authTokenCacheMu.Unlock()
+	authTokenCache[key] = token
+}
+
+func tokenScopes(token string, fallback []string) []string {
+	scopes := parseJWTScopes(token)
+	if len(scopes) > 0 {
+		return scopes
+	}
+	return dedupeStrings(append([]string(nil), fallback...))
+}
+
+func parseJWTScopes(token string) []string {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil
+	}
+
+	var scopes []string
+	scopes = append(scopes, scopesFromAny(claims["scope"])...)
+	scopes = append(scopes, scopesFromAny(claims["scp"])...)
+	return dedupeStrings(scopes)
+}
+
+func splitScopeString(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t'
+	})
+	return dedupeStrings(parts)
+}
+
+func scopesFromAny(raw any) []string {
+	switch typed := raw.(type) {
+	case string:
+		return splitScopeString(typed)
+	case []string:
+		return dedupeStrings(append([]string(nil), typed...))
+	case []any:
+		var scopes []string
+		for _, item := range typed {
+			scopes = append(scopes, scopesFromAny(item)...)
+		}
+		return dedupeStrings(scopes)
+	default:
+		return nil
+	}
+}
+
+func dedupeStrings(values []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func mergeScopes(groups ...[]string) []string {
+	var merged []string
+	for _, group := range groups {
+		merged = append(merged, group...)
+	}
+	return dedupeStrings(merged)
+}
+
+func parseMaybeJSON(body []byte) any {
+	var parsed any
+	if err := json.Unmarshal(body, &parsed); err == nil {
+		return parsed
+	}
+	return strings.TrimSpace(string(body))
+}
+
+func applyOverrideAuth(auth OverrideAuth, headers http.Header, query url.Values, cookies *[]*http.Cookie, masked map[string][]string, maskedQueryKeys map[string]bool) {
+	for _, entry := range auth.Headers {
+		value, ok := authOverrideValue(entry)
+		if !ok {
+			continue
+		}
+		headers.Set(entry.Name, value)
+		masked[entry.Name] = []string{"***"}
+	}
+	for _, entry := range auth.Query {
+		value, ok := authOverrideValue(entry)
+		if !ok {
+			continue
+		}
+		query.Set(entry.Name, value)
+		maskedQueryKeys[entry.Name] = true
+	}
+	for _, entry := range auth.Cookies {
+		value, ok := authOverrideValue(entry)
+		if !ok {
+			continue
+		}
+		*cookies = append(*cookies, &http.Cookie{Name: entry.Name, Value: value})
+	}
+}
+
+func authOverrideValue(entry AuthValueOverride) (string, bool) {
+	var raw string
+	if strings.TrimSpace(entry.Env) != "" {
+		raw = strings.TrimSpace(os.Getenv(entry.Env))
+	} else {
+		raw = strings.TrimSpace(entry.Value)
+	}
+	if raw == "" {
+		return "", false
+	}
+	return entry.Prefix + raw, true
+}
+
+func mergedOperationOverride(operation OperationManifest, overrides RuntimeOverrides) OperationOverride {
+	merged := OperationOverride{}
+	seen := map[string]bool{}
+	keys := append([]string{operation.ID}, operation.Aliases...)
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		override, ok := overrides.Operations[key]
+		if !ok {
+			continue
+		}
+		merged.Auth = mergedOverrideAuth(merged.Auth, override.Auth)
+		merged.Requirements = append(merged.Requirements, override.Requirements...)
+	}
+	return merged
+}
+
+func mergedOverrideAuth(left, right OverrideAuth) OverrideAuth {
+	return OverrideAuth{
+		Headers: append(append([]AuthValueOverride(nil), left.Headers...), right.Headers...),
+		Query:   append(append([]AuthValueOverride(nil), left.Query...), right.Query...),
+		Cookies: append(append([]AuthValueOverride(nil), left.Cookies...), right.Cookies...),
+	}
+}
+
+func resolveBaseURL(manifest Manifest, explicit string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		return strings.TrimSpace(explicit), nil
+	}
+	if env := strings.TrimSpace(os.Getenv(manifest.Env.BaseURL)); env != "" {
+		return env, nil
+	}
+	if manifest.DefaultServer == "" {
+		return "", &cliError{
+			Code:     "missing_base_url",
+			Message:  "no base URL was provided and the spec does not define a server URL",
+			ExitCode: 2,
+		}
+	}
+	if manifest.RelativeServer {
+		return "", &cliError{
+			Code:     "missing_base_url",
+			Message:  fmt.Sprintf("set %s or pass --base-url because the spec only defines a relative server URL (%s)", manifest.Env.BaseURL, manifest.DefaultServer),
+			ExitCode: 2,
+		}
+	}
+	if manifest.ServerTemplate != "" && len(manifest.ServerVars) > 0 {
+		resolved, err := resolveServerTemplate(manifest.ServerTemplate, manifest.ServerVars)
+		if err != nil {
+			return "", err
+		}
+		if resolved != "" {
+			return resolved, nil
+		}
+	}
+	return manifest.DefaultServer, nil
+}
+
+func resolveServerTemplate(template string, variables []ServerVariable) (string, error) {
+	resolved := strings.TrimSpace(template)
+	if resolved == "" {
+		return "", nil
+	}
+
+	for _, variable := range variables {
+		if strings.TrimSpace(variable.Name) == "" {
+			continue
+		}
+		value := strings.TrimSpace(os.Getenv(variable.EnvVar))
+		if value == "" {
+			value = strings.TrimSpace(variable.Default)
+		}
+		if value == "" {
+			return "", &cliError{
+				Code:     "missing_server_variable",
+				Message:  fmt.Sprintf("set %s or pass --base-url because the server variable %q has no default", variable.EnvVar, variable.Name),
+				ExitCode: 2,
+			}
+		}
+		resolved = strings.ReplaceAll(resolved, "{"+variable.Name+"}", value)
+	}
+
+	if strings.Contains(resolved, "{") && strings.Contains(resolved, "}") {
+		return "", &cliError{
+			Code:     "missing_server_variable",
+			Message:  "server URL still contains unresolved template variables; set the corresponding server variable env vars or pass --base-url",
+			Details:  resolved,
+			ExitCode: 2,
+		}
+	}
+
+	return resolved, nil
+}
+
+func joinBaseURL(base, path string, query url.Values) (string, error) {
+	baseURL, err := url.Parse(base)
+	if err != nil {
+		return "", &cliError{
+			Code:     "invalid_base_url",
+			Message:  "base URL is invalid",
+			Details:  err.Error(),
+			ExitCode: 2,
+		}
+	}
+
+	resolvedPath := strings.TrimRight(baseURL.Path, "/") + path
+	baseURL.Path = resolvedPath
+	baseURL.RawQuery = query.Encode()
+	return baseURL.String(), nil
+}
+
+func requestContentType(operation *openapi3.Operation) string {
+	if operation == nil || operation.RequestBody == nil || operation.RequestBody.Value == nil {
+		return ""
+	}
+	content := operation.RequestBody.Value.Content
+	if _, ok := content["application/json"]; ok {
+		return "application/json"
+	}
+	types := make([]string, 0, len(content))
+	for contentType := range content {
+		types = append(types, contentType)
+	}
+	sort.Strings(types)
+	if len(types) == 0 {
+		return ""
+	}
+	return types[0]
+}
+
+func collectParameters(pathItem *openapi3.PathItem, operation *openapi3.Operation) []*openapi3.ParameterRef {
+	keyed := map[string]*openapi3.ParameterRef{}
+	order := []string{}
+	if pathItem != nil {
+		for _, entry := range pathItem.Parameters {
+			if entry == nil || entry.Value == nil {
+				continue
+			}
+			key := entry.Value.In + ":" + entry.Value.Name
+			if _, exists := keyed[key]; !exists {
+				order = append(order, key)
+			}
+			keyed[key] = entry
+		}
+	}
+	if operation != nil {
+		for _, entry := range operation.Parameters {
+			if entry == nil || entry.Value == nil {
+				continue
+			}
+			key := entry.Value.In + ":" + entry.Value.Name
+			if _, exists := keyed[key]; !exists {
+				order = append(order, key)
+			}
+			keyed[key] = entry
+		}
+	}
+	out := make([]*openapi3.ParameterRef, 0, len(order))
+	for _, key := range order {
+		out = append(out, keyed[key])
+	}
+	return out
+}
+
+func parameterIndexByLocation(pathItem *openapi3.PathItem, operation *openapi3.Operation) map[string]map[string]*openapi3.ParameterRef {
+	out := map[string]map[string]*openapi3.ParameterRef{
+		"path":   {},
+		"query":  {},
+		"header": {},
+		"cookie": {},
+	}
+	for _, entry := range collectParameters(pathItem, operation) {
+		if entry == nil || entry.Value == nil {
+			continue
+		}
+		location := entry.Value.In
+		if location == "" {
+			location = "query"
+		}
+		if _, ok := out[location]; !ok {
+			out[location] = map[string]*openapi3.ParameterRef{}
+		}
+		out[location][entry.Value.Name] = entry
+	}
+	return out
+}
+
+func applyQueryValue(values url.Values, key string, value any) {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			values.Add(key, stringValue(item))
+		}
+	default:
+		values.Add(key, stringValue(typed))
+	}
+}
+
+func parseResponseBody(body []byte, contentType string) any {
+	if len(body) == 0 {
+		return nil
+	}
+	if strings.Contains(strings.ToLower(contentType), "json") {
+		var parsed any
+		if err := json.Unmarshal(body, &parsed); err == nil {
+			return parsed
+		}
+	}
+	return string(body)
+}
+
+func loadManifest() (Manifest, error) {
+	manifestOnce.Do(func() {
+		data, err := embeddedFiles.ReadFile("manifest.json")
+		if err != nil {
+			manifestErr = &cliError{
+				Code:     "read_manifest_failed",
+				Message:  "failed to read embedded manifest",
+				Details:  err.Error(),
+				ExitCode: 1,
+			}
+			return
+		}
+		if err := json.Unmarshal(data, &manifestData); err != nil {
+			manifestErr = &cliError{
+				Code:     "parse_manifest_failed",
+				Message:  "failed to parse embedded manifest",
+				Details:  err.Error(),
+				ExitCode: 1,
+			}
+		}
+	})
+	return manifestData, manifestErr
+}
+
+func loadOperationIndex() (map[string]OperationManifest, error) {
+	operationIndexOnce.Do(func() {
+		manifest, err := loadManifest()
+		if err != nil {
+			operationIndexErr = err
+			return
+		}
+
+		index := make(map[string]OperationManifest, len(manifest.Operations))
+		for _, operation := range manifest.Operations {
+			index[operation.ID] = operation
+			for _, alias := range operation.Aliases {
+				index[alias] = operation
+			}
+		}
+		operationIndexData = index
+	})
+	return operationIndexData, operationIndexErr
+}
+
+func loadDoc() (*openapi3.T, error) {
+	docOnce.Do(func() {
+		data, err := embeddedFiles.ReadFile("openapi.json")
+		if err != nil {
+			docErr = &cliError{
+				Code:     "read_spec_failed",
+				Message:  "failed to read embedded spec",
+				Details:  err.Error(),
+				ExitCode: 1,
+			}
+			return
+		}
+		loader := openapi3.NewLoader()
+		loader.IsExternalRefsAllowed = true
+		docData, err = loader.LoadFromData(data)
+		if err != nil {
+			docErr = &cliError{
+				Code:     "parse_spec_failed",
+				Message:  "failed to parse embedded spec",
+				Details:  err.Error(),
+				ExitCode: 1,
+			}
+			return
+		}
+		if err := docData.Validate(context.Background()); err != nil {
+			docErr = &cliError{
+				Code:     "invalid_spec",
+				Message:  "embedded spec failed validation",
+				Details:  err.Error(),
+				ExitCode: 1,
+			}
+		}
+	})
+	return docData, docErr
+}
+
+func loadOverrides() (RuntimeOverrides, error) {
+	overridesOnce.Do(func() {
+		raw := strings.TrimSpace(os.Getenv(overridesEnv))
+		if raw == "" {
+			overridesData.Operations = map[string]OperationOverride{}
+			return
+		}
+		if err := json.Unmarshal([]byte(raw), &overridesData); err != nil {
+			overridesErr = &cliError{
+				Code:     "invalid_overrides",
+				Message:  fmt.Sprintf("failed to parse %s", overridesEnv),
+				Details:  err.Error(),
+				ExitCode: 2,
+			}
+			return
+		}
+		if overridesData.Operations == nil {
+			overridesData.Operations = map[string]OperationOverride{}
+		}
+		if err := validateRuntimeOverrides(overridesData); err != nil {
+			overridesErr = err
+		}
+	})
+	return overridesData, overridesErr
+}
+
+func validateRuntimeOverrides(overrides RuntimeOverrides) error {
+	var problems []string
+	problems = append(problems, validateOverrideAuth(overrides.Auth, "auth")...)
+
+	operationIDs := make([]string, 0, len(overrides.Operations))
+	for operationID := range overrides.Operations {
+		operationIDs = append(operationIDs, operationID)
+	}
+	sort.Strings(operationIDs)
+
+	for _, operationID := range operationIDs {
+		override := overrides.Operations[operationID]
+		problems = append(problems, validateOverrideAuth(override.Auth, fmt.Sprintf("operations.%s.auth", operationID))...)
+		for index, requirement := range override.Requirements {
+			path := fmt.Sprintf("operations.%s.requirements[%d]", operationID, index)
+			if len(requirement.Require) == 0 {
+				problems = append(problems, path+".require must not be empty")
+			}
+			for conditionIndex, condition := range requirement.When {
+				conditionPath := fmt.Sprintf("%s.when[%d]", path, conditionIndex)
+				if err := validateInputLocation(condition.Location, true); err != nil {
+					problems = append(problems, conditionPath+".location "+err.Error())
+				}
+				if strings.TrimSpace(condition.Name) == "" {
+					problems = append(problems, conditionPath+".name must not be empty")
+				}
+				matchers := 0
+				if condition.Exists != nil {
+					matchers++
+				}
+				if condition.Equals != nil {
+					matchers++
+				}
+				if len(condition.OneOf) > 0 {
+					matchers++
+				}
+				if matchers == 0 {
+					problems = append(problems, conditionPath+" must set one of exists, equals, or oneOf")
+				}
+				if matchers > 1 {
+					problems = append(problems, conditionPath+" must not combine exists, equals, and oneOf")
+				}
+			}
+			for requireIndex, target := range requirement.Require {
+				targetPath := fmt.Sprintf("%s.require[%d]", path, requireIndex)
+				if err := validateInputLocation(target.Location, true); err != nil {
+					problems = append(problems, targetPath+".location "+err.Error())
+				}
+				if strings.TrimSpace(target.Name) == "" {
+					problems = append(problems, targetPath+".name must not be empty")
+				}
+			}
+		}
+	}
+
+	if len(problems) == 0 {
+		return nil
+	}
+
+	return &cliError{
+		Code:     "invalid_overrides",
+		Message:  fmt.Sprintf("%s is invalid", overridesEnv),
+		Details:  problems,
+		ExitCode: 2,
+	}
+}
+
+func validateOverrideAuth(auth OverrideAuth, path string) []string {
+	var problems []string
+	for index, entry := range auth.Headers {
+		problems = append(problems, validateAuthValueOverride(entry, "header", fmt.Sprintf("%s.headers[%d]", path, index))...)
+	}
+	for index, entry := range auth.Query {
+		problems = append(problems, validateAuthValueOverride(entry, "query", fmt.Sprintf("%s.query[%d]", path, index))...)
+	}
+	for index, entry := range auth.Cookies {
+		problems = append(problems, validateAuthValueOverride(entry, "cookie", fmt.Sprintf("%s.cookies[%d]", path, index))...)
+	}
+	return problems
+}
+
+func validateAuthValueOverride(entry AuthValueOverride, location, path string) []string {
+	var problems []string
+	if strings.TrimSpace(entry.Name) == "" {
+		problems = append(problems, path+".name must not be empty")
+	}
+	if err := validateInputLocation(location, false); err != nil {
+		problems = append(problems, path+" "+err.Error())
+	}
+	hasEnv := strings.TrimSpace(entry.Env) != ""
+	hasValue := strings.TrimSpace(entry.Value) != ""
+	switch {
+	case !hasEnv && !hasValue:
+		problems = append(problems, path+" must set either env or value")
+	case hasEnv && hasValue:
+		problems = append(problems, path+" must set only one of env or value")
+	}
+	return problems
+}
+
+func validateInputLocation(location string, allowBody bool) error {
+	switch strings.ToLower(strings.TrimSpace(location)) {
+	case "path", "query", "header", "cookie":
+		return nil
+	case "body":
+		if allowBody {
+			return nil
+		}
+	}
+	if allowBody {
+		return fmt.Errorf("must be one of path, query, header, cookie, or body")
+	}
+	return fmt.Errorf("must be one of header, query, or cookie")
+}
+
+// Operation resolution against the embedded manifest and spec.
+func resolveOperation(id string) (OperationManifest, *openapi3.PathItem, *openapi3.Operation, error) {
+	index, err := loadOperationIndex()
+	if err != nil {
+		return OperationManifest{}, nil, nil, err
+	}
+	doc, err := loadDoc()
+	if err != nil {
+		return OperationManifest{}, nil, nil, err
+	}
+
+	operation, ok := index[id]
+	if !ok {
+		return OperationManifest{}, nil, nil, &cliError{
+			Code:     "unknown_operation",
+			Message:  fmt.Sprintf("unknown operation ID or alias %q", id),
+			ExitCode: 2,
+		}
+	}
+
+	pathItem := doc.Paths.Map()[operation.Path]
+	if pathItem == nil {
+		return OperationManifest{}, nil, nil, &cliError{
+			Code:     "operation_missing",
+			Message:  "operation path is missing from the embedded spec",
+			Details:  operation,
+			ExitCode: 1,
+		}
+	}
+	resolved := operationForMethod(pathItem, operation.Method)
+	if resolved == nil {
+		return OperationManifest{}, nil, nil, &cliError{
+			Code:     "operation_missing",
+			Message:  "operation method is missing from the embedded spec",
+			Details:  operation,
+			ExitCode: 1,
+		}
+	}
+	return operation, pathItem, resolved, nil
+}
+
+func operationForMethod(item *openapi3.PathItem, method string) *openapi3.Operation {
+	if item == nil {
+		return nil
+	}
+	switch strings.ToUpper(method) {
+	case "DELETE":
+		return item.Delete
+	case "GET":
+		return item.Get
+	case "HEAD":
+		return item.Head
+	case "OPTIONS":
+		return item.Options
+	case "PATCH":
+		return item.Patch
+	case "POST":
+		return item.Post
+	case "PUT":
+		return item.Put
+	case "TRACE":
+		return item.Trace
+	default:
+		return nil
+	}
+}
+
+func firstJSONContentSchema(content openapi3.Content) *openapi3.SchemaRef {
+	if content == nil {
+		return nil
+	}
+	if media := content.Get("application/json"); media != nil {
+		return media.Schema
+	}
+	keys := make([]string, 0, len(content))
+	for key := range content {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if strings.Contains(strings.ToLower(key), "json") {
+			if media := content[key]; media != nil {
+				return media.Schema
+			}
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	media := content[keys[0]]
+	if media == nil {
+		return nil
+	}
+	return media.Schema
+}
+
+func firstSuccessJSONSchema(operation *openapi3.Operation) *openapi3.SchemaRef {
+	if operation == nil || operation.Responses == nil {
+		return nil
+	}
+	for _, code := range sortedResponseCodes(operation.Responses) {
+		if !strings.HasPrefix(code, "2") {
+			continue
+		}
+		response := operation.Responses.Map()[code]
+		if response == nil || response.Value == nil {
+			continue
+		}
+		if schema := firstJSONContentSchema(response.Value.Content); schema != nil {
+			return schema
+		}
+	}
+	return nil
+}
+
+func sortedResponseCodes(responses *openapi3.Responses) []string {
+	if responses == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(responses.Map()))
+	for key := range responses.Map() {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func stringValue(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(typed), 'f', -1, 64)
+	case int:
+		return strconv.Itoa(typed)
+	case int64:
+		return strconv.FormatInt(typed, 10)
+	case bool:
+		return strconv.FormatBool(typed)
+	default:
+		blob, err := json.Marshal(typed)
+		if err != nil {
+			return fmt.Sprint(typed)
+		}
+		return string(blob)
+	}
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func printJSON(value any) error {
+	blob, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return &cliError{
+			Code:     "marshal_failed",
+			Message:  "failed to marshal JSON output",
+			Details:  err.Error(),
+			ExitCode: 1,
+		}
+	}
+	fmt.Println(string(blob))
+	return nil
+}
+
+func printError(err error) {
+	payload := map[string]any{
+		"error": map[string]any{
+			"message": err.Error(),
+		},
+	}
+	var cliErr *cliError
+	if errors.As(err, &cliErr) {
+		payload["error"] = map[string]any{
+			"code":    cliErr.Code,
+			"message": cliErr.Message,
+			"details": cliErr.Details,
+		}
+	}
+	blob, _ := json.MarshalIndent(payload, "", "  ")
+	fmt.Fprintln(os.Stderr, string(blob))
+}
+
+func exitCode(err error) int {
+	var cliErr *cliError
+	if errors.As(err, &cliErr) {
+		if cliErr.ExitCode > 0 {
+			return cliErr.ExitCode
+		}
+	}
+	return 1
+}
+
+func flagError(err error) error {
+	return &cliError{
+		Code:     "invalid_flags",
+		Message:  err.Error(),
+		ExitCode: 2,
+	}
+}
+
+func newFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	return fs
+}
+
+func normalizeValidationError(err error) string {
+	var multi openapi3.MultiError
+	if errors.As(err, &multi) {
+		parts := make([]string, 0, len(multi))
+		for _, item := range multi {
+			parts = append(parts, compactValidationLine(item.Error()))
+		}
+		return strings.Join(parts, "; ")
+	}
+	return compactValidationLine(err.Error())
+}
+
+func matchesFilter(op OperationManifest, filter string) bool {
+	if strings.TrimSpace(filter) == "" {
+		return true
+	}
+	needle := strings.ToLower(strings.TrimSpace(filter))
+	if strings.Contains(strings.ToLower(op.ID), needle) || strings.Contains(strings.ToLower(op.Path), needle) || strings.Contains(strings.ToLower(op.Summary), needle) {
+		return true
+	}
+	for _, alias := range op.Aliases {
+		if strings.Contains(strings.ToLower(alias), needle) {
+			return true
+		}
+	}
+	for _, tag := range op.Tags {
+		if strings.Contains(strings.ToLower(tag), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneHeader(header http.Header) http.Header {
+	out := http.Header{}
+	for key, values := range header {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
+}
+
+func headerToMap(header http.Header) map[string][]string {
+	out := map[string][]string{}
+	for key, values := range header {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
+}
+
+func maskedQueryValues(values url.Values, masked map[string]bool) url.Values {
+	out := url.Values{}
+	for key, entries := range values {
+		if masked[key] {
+			out[key] = []string{"***"}
+			continue
+		}
+		out[key] = append([]string(nil), entries...)
+	}
+	return out
+}
+
+func cloneMap(input map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
+}
+
+func newResolvedParams() *resolvedParams {
+	return &resolvedParams{
+		Path:   map[string]any{},
+		Query:  map[string]any{},
+		Header: map[string]any{},
+		Cookie: map[string]any{},
+	}
+}
+
+func (p *resolvedParams) all() map[string]map[string]any {
+	if p == nil {
+		return map[string]map[string]any{
+			"path":   {},
+			"query":  {},
+			"header": {},
+			"cookie": {},
+		}
+	}
+	return map[string]map[string]any{
+		"path":   p.Path,
+		"query":  p.Query,
+		"header": p.Header,
+		"cookie": p.Cookie,
+	}
+}
+
+func paramsByLocation(params *resolvedParams, location string) map[string]any {
+	if params == nil {
+		return map[string]any{}
+	}
+	switch location {
+	case "path":
+		return params.Path
+	case "query":
+		return params.Query
+	case "header":
+		return params.Header
+	case "cookie":
+		return params.Cookie
+	default:
+		return map[string]any{}
+	}
+}
+
+func resolveParamsInput(pathItem *openapi3.PathItem, operation *openapi3.Operation, raw map[string]any) (*resolvedParams, error) {
+	resolved := newResolvedParams()
+	index := parameterIndexByLocation(pathItem, operation)
+	nameLocations := map[string][]string{}
+	for location, definitions := range index {
+		for name := range definitions {
+			nameLocations[name] = append(nameLocations[name], location)
+		}
+	}
+	for name := range nameLocations {
+		sort.Strings(nameLocations[name])
+	}
+
+	for key, value := range raw {
+		switch key {
+		case "path", "query", "header", "cookie":
+			locationPayload, ok := value.(map[string]any)
+			if !ok {
+				return nil, &cliError{
+					Code:     "invalid_params_shape",
+					Message:  fmt.Sprintf("params.%s must be a JSON object", key),
+					ExitCode: 2,
+				}
+			}
+			target := paramsByLocation(resolved, key)
+			for childKey, childValue := range locationPayload {
+				target[childKey] = childValue
+			}
+			continue
+		}
+
+		locations := nameLocations[key]
+		switch len(locations) {
+		case 0:
+			return nil, &cliError{
+				Code:     "unknown_parameter",
+				Message:  fmt.Sprintf("parameter %q is not defined for this operation", key),
+				ExitCode: 2,
+			}
+		case 1:
+			paramsByLocation(resolved, locations[0])[key] = value
+		default:
+			return nil, &cliError{
+				Code:     "ambiguous_parameter",
+				Message:  fmt.Sprintf("parameter %q exists in multiple locations (%s); use params.path/query/header/cookie to disambiguate", key, strings.Join(locations, ", ")),
+				ExitCode: 2,
+			}
+		}
+	}
+
+	return resolved, nil
+}
+
+func setPaginatedParam(raw map[string]any, name string, value any) map[string]any {
+	next := cloneMap(raw)
+	queryBlock, _ := next["query"].(map[string]any)
+	copied := map[string]any{}
+	for key, item := range queryBlock {
+		copied[key] = item
+	}
+	copied[name] = value
+	next["query"] = copied
+	delete(next, name)
+	return next
+}
+
+// Conditional validation and auth preflight.
+func validateOverrideRequirements(operation OperationManifest, overrides RuntimeOverrides, params *resolvedParams, headers map[string]any, bodyValue any) error {
+	override := mergedOperationOverride(operation, overrides)
+	if len(override.Requirements) == 0 {
+		return nil
+	}
+
+	var problems []string
+	for _, requirement := range override.Requirements {
+		if !requirementMatches(requirement, params, headers, bodyValue) {
+			continue
+		}
+
+		missing := make([]string, 0, len(requirement.Require))
+		for _, target := range requirement.Require {
+			if targetPresent(target, params, headers, bodyValue) {
+				continue
+			}
+			missing = append(missing, inputTargetLabel(target))
+		}
+		if len(missing) == 0 {
+			continue
+		}
+
+		if strings.TrimSpace(requirement.Message) != "" {
+			problems = append(problems, requirement.Message)
+			continue
+		}
+		problems = append(problems, fmt.Sprintf("missing required inputs: %s", strings.Join(missing, ", ")))
+	}
+
+	if len(problems) == 0 {
+		return nil
+	}
+
+	return &cliError{
+		Code:     "validation_failed",
+		Message:  "request validation failed",
+		Details:  problems,
+		ExitCode: 2,
+	}
+}
+
+func requirementMatches(requirement ConditionalRequirement, params *resolvedParams, headers map[string]any, bodyValue any) bool {
+	if len(requirement.When) == 0 {
+		return true
+	}
+	for _, condition := range requirement.When {
+		if !conditionMatches(condition, params, headers, bodyValue) {
+			return false
+		}
+	}
+	return true
+}
+
+func conditionMatches(condition InputCondition, params *resolvedParams, headers map[string]any, bodyValue any) bool {
+	value, ok := inputValue(strings.ToLower(strings.TrimSpace(condition.Location)), condition.Name, params, headers, bodyValue)
+	if condition.Exists != nil {
+		return valuePresent(value, ok) == *condition.Exists
+	}
+	if !ok {
+		return false
+	}
+	if condition.Equals != nil {
+		return valuesEqual(value, condition.Equals)
+	}
+	for _, candidate := range condition.OneOf {
+		if valuesEqual(value, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func targetPresent(target InputTarget, params *resolvedParams, headers map[string]any, bodyValue any) bool {
+	value, ok := inputValue(strings.ToLower(strings.TrimSpace(target.Location)), target.Name, params, headers, bodyValue)
+	return valuePresent(value, ok)
+}
+
+func inputValue(location, name string, params *resolvedParams, headers map[string]any, bodyValue any) (any, bool) {
+	switch location {
+	case "path", "query", "cookie":
+		values := paramsByLocation(params, location)
+		value, ok := values[name]
+		return value, ok
+	case "header":
+		return headerInputValue(params, headers, name)
+	case "body":
+		return bodyInputValue(bodyValue, name)
+	default:
+		return nil, false
+	}
+}
+
+func headerInputValue(params *resolvedParams, headers map[string]any, name string) (any, bool) {
+	for key, value := range paramsByLocation(params, "header") {
+		if strings.EqualFold(key, name) {
+			return value, true
+		}
+	}
+	for key, value := range headers {
+		if strings.EqualFold(key, name) {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+func bodyInputValue(bodyValue any, name string) (any, bool) {
+	if strings.TrimSpace(name) == "" {
+		if bodyValue == nil {
+			return nil, false
+		}
+		return bodyValue, true
+	}
+	if strings.HasPrefix(name, "/") {
+		return jsonPathValue(bodyValue, name)
+	}
+
+	current := bodyValue
+	for _, part := range strings.Split(name, ".") {
+		if strings.TrimSpace(part) == "" {
+			return nil, false
+		}
+		switch typed := current.(type) {
+		case map[string]any:
+			next, ok := typed[part]
+			if !ok {
+				return nil, false
+			}
+			current = next
+		case []any:
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(typed) {
+				return nil, false
+			}
+			current = typed[index]
+		default:
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func valuePresent(value any, ok bool) bool {
+	if !ok || value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case []any:
+		return len(typed) > 0
+	case map[string]any:
+		return len(typed) > 0
+	default:
+		return true
+	}
+}
+
+func valuesEqual(actual, expected any) bool {
+	if reflect.DeepEqual(actual, expected) {
+		return true
+	}
+	if scalarValue(actual) && scalarValue(expected) {
+		return stringValue(actual) == stringValue(expected)
+	}
+	return false
+}
+
+func scalarValue(value any) bool {
+	switch value.(type) {
+	case nil, string, float64, float32, int, int64, bool:
+		return true
+	default:
+		return false
+	}
+}
+
+func inputTargetLabel(target InputTarget) string {
+	return strings.ToLower(strings.TrimSpace(target.Location)) + "." + target.Name
+}
+
+func validateAuthRequirements(operation OperationManifest, request *preparedRequest, overrides RuntimeOverrides) error {
+	override := mergedOverrideAuth(overrides.Auth, mergedOperationOverride(operation, overrides).Auth)
+	if missing := missingRequiredOverrideAuth(request, override); len(missing) > 0 {
+		return &cliError{
+			Code:    "missing_auth",
+			Message: "request requires runtime auth overrides that are not configured",
+			Details: map[string]any{
+				"missing": missing,
+			},
+			ExitCode: 2,
+		}
+	}
+	if request == nil || len(operation.Security) == 0 {
+		return nil
+	}
+
+	manifest, err := loadManifest()
+	if err != nil {
+		return err
+	}
+	schemes := map[string]AuthScheme{}
+	for _, scheme := range manifest.Auth {
+		schemes[scheme.Name] = scheme
+	}
+
+	var scopeFailure any
+	for _, requirement := range operation.Security {
+		if len(requirement) == 0 {
+			return nil
+		}
+		allSatisfied := true
+		requirementScopes := append([]string(nil), operation.RequiredScopes...)
+		grantedScopes := []string{}
+		allScopesKnown := true
+		for name := range requirement {
+			scheme, ok := schemes[name]
+			if !ok || !requestSatisfiesScheme(request, scheme) {
+				allSatisfied = false
+				break
+			}
+			requirementScopes = append(requirementScopes, requirement[name]...)
+			state, ok := request.Auth[name]
+			if !ok || !state.KnownScopes {
+				allScopesKnown = false
+				continue
+			}
+			grantedScopes = append(grantedScopes, state.GrantedScopes...)
+		}
+		if allSatisfied {
+			requiredScopes := dedupeStrings(requirementScopes)
+			if len(requiredScopes) > 0 && allScopesKnown {
+				missingScopes := missingScopes(requiredScopes, grantedScopes)
+				if len(missingScopes) > 0 {
+					scopeFailure = map[string]any{
+						"required": requiredScopes,
+						"granted":  dedupeStrings(grantedScopes),
+						"missing":  missingScopes,
+					}
+					continue
+				}
+			}
+			return nil
+		}
+	}
+
+	if scopeFailure != nil {
+		return &cliError{
+			Code:     "missing_scope",
+			Message:  "configured authentication does not grant the scopes required by this operation",
+			Details:  scopeFailure,
+			ExitCode: 2,
+		}
+	}
+
+	return &cliError{
+		Code:    "missing_auth",
+		Message: "request requires authentication but no configured security scheme matched the operation requirements",
+		Details: map[string]any{
+			"security":       operation.Security,
+			"requiredScopes": operation.RequiredScopes,
+			"schemes":        manifest.Auth,
+		},
+		ExitCode: 2,
+	}
+}
+
+func missingScopes(required, granted []string) []string {
+	grantedSet := map[string]bool{}
+	for _, scope := range dedupeStrings(granted) {
+		grantedSet[scope] = true
+	}
+	var missing []string
+	for _, scope := range dedupeStrings(required) {
+		if !grantedSet[scope] {
+			missing = append(missing, scope)
+		}
+	}
+	return missing
+}
+
+func missingRequiredOverrideAuth(request *preparedRequest, auth OverrideAuth) []map[string]any {
+	var missing []map[string]any
+	for _, entry := range auth.Headers {
+		if !entry.Required {
+			continue
+		}
+		if requestSatisfiesOverrideAuth(request, entry, "header") {
+			continue
+		}
+		missing = append(missing, map[string]any{
+			"location": "header",
+			"name":     entry.Name,
+			"env":      entry.Env,
+		})
+	}
+	for _, entry := range auth.Query {
+		if !entry.Required {
+			continue
+		}
+		if requestSatisfiesOverrideAuth(request, entry, "query") {
+			continue
+		}
+		missing = append(missing, map[string]any{
+			"location": "query",
+			"name":     entry.Name,
+			"env":      entry.Env,
+		})
+	}
+	for _, entry := range auth.Cookies {
+		if !entry.Required {
+			continue
+		}
+		if requestSatisfiesOverrideAuth(request, entry, "cookie") {
+			continue
+		}
+		missing = append(missing, map[string]any{
+			"location": "cookie",
+			"name":     entry.Name,
+			"env":      entry.Env,
+		})
+	}
+	return missing
+}
+
+func requestSatisfiesOverrideAuth(request *preparedRequest, entry AuthValueOverride, location string) bool {
+	if request == nil {
+		return false
+	}
+	switch location {
+	case "header":
+		for key, values := range request.Headers {
+			if !strings.EqualFold(key, entry.Name) || len(values) == 0 {
+				continue
+			}
+			return authValueMatches(values[len(values)-1], entry.Prefix)
+		}
+		return false
+	case "query":
+		parsedURL, err := url.Parse(request.URL)
+		if err != nil {
+			return false
+		}
+		return authValueMatches(parsedURL.Query().Get(entry.Name), entry.Prefix)
+	case "cookie":
+		for _, cookie := range request.Cookies {
+			if cookie == nil || cookie.Name != entry.Name {
+				continue
+			}
+			return authValueMatches(cookie.Value, entry.Prefix)
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func authValueMatches(value, prefix string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+	if prefix == "" {
+		return true
+	}
+	if !strings.HasPrefix(trimmed, prefix) {
+		return false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(trimmed, prefix)) != ""
+}
+
+func requestSatisfiesScheme(request *preparedRequest, scheme AuthScheme) bool {
+	if request == nil {
+		return false
+	}
+	switch {
+	case scheme.Type == "http" && strings.EqualFold(scheme.Scheme, "basic"):
+		return strings.HasPrefix(strings.TrimSpace(request.Headers.Get("Authorization")), "Basic ")
+	case (scheme.Type == "http" && strings.EqualFold(scheme.Scheme, "bearer")) || scheme.Type == "oauth2":
+		return strings.HasPrefix(strings.TrimSpace(request.Headers.Get("Authorization")), "Bearer ")
+	case scheme.Type == "apiKey" && strings.EqualFold(scheme.In, "header") && scheme.HeaderName != "":
+		return strings.TrimSpace(request.Headers.Get(scheme.HeaderName)) != ""
+	case scheme.Type == "apiKey" && strings.EqualFold(scheme.In, "cookie") && scheme.CookieName != "":
+		for _, cookie := range request.Cookies {
+			if cookie != nil && cookie.Name == scheme.CookieName && strings.TrimSpace(cookie.Value) != "" {
+				return true
+			}
+		}
+		return false
+	case scheme.Type == "apiKey" && strings.EqualFold(scheme.In, "query") && scheme.QueryName != "":
+		parsedURL, err := url.Parse(request.URL)
+		if err != nil {
+			return false
+		}
+		return strings.TrimSpace(parsedURL.Query().Get(scheme.QueryName)) != ""
+	default:
+		return false
+	}
+}
+
+// Shared utility helpers.
+func copySeen(input map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
+}
+
+func schemaHasType(schema *openapi3.Schema, expected string) bool {
+	if schema == nil || schema.Type == nil {
+		return false
+	}
+	for _, kind := range *schema.Type {
+		if kind == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func firstValue(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func compactValidationLine(text string) string {
+	line := strings.TrimSpace(strings.Split(text, "\n")[0])
+	if line == "" {
+		return strings.TrimSpace(text)
+	}
+	return line
+}
+
+func maxResponseBytes() int {
+	raw := strings.TrimSpace(os.Getenv(maxResponseBytesEnv))
+	if raw == "" {
+		return defaultMaxResponseBytes
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return defaultMaxResponseBytes
+	}
+	return value
+}
+
+func jsonPathValue(value any, pointer string) (any, bool) {
+	if pointer == "" || pointer == "/" {
+		return value, true
+	}
+	current := value
+	parts := strings.Split(strings.TrimPrefix(pointer, "/"), "/")
+	for _, part := range parts {
+		decoded := strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
+		switch typed := current.(type) {
+		case map[string]any:
+			next, ok := typed[decoded]
+			if !ok {
+				return nil, false
+			}
+			current = next
+		case []any:
+			index, err := strconv.Atoi(decoded)
+			if err != nil || index < 0 || index >= len(typed) {
+				return nil, false
+			}
+			current = typed[index]
+		default:
+			return nil, false
+		}
+	}
+	return current, true
+}

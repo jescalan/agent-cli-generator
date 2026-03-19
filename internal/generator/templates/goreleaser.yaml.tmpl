@@ -1,0 +1,52 @@
+project_name: {{ .Manifest.Name }}
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: {{ .Manifest.Name }}
+    binary: {{ .Manifest.Name }}
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ "{{" }} .ProjectName {{ "}}" }}_{{ "{{" }} .Version {{ "}}" }}_{{ "{{" }} .Os {{ "}}" }}_{{ "{{" }} .Arch {{ "}}" }}"
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ "{{" }} incpatch .Version {{ "}}" }}-next"
+
+changelog:
+  disable: true
+
+release:
+  draft: false
+{{- if .Release.HasHomebrewTap }}
+
+brews:
+  - repository:
+      owner: {{ .Release.HomebrewTapOwner }}
+      name: {{ .Release.HomebrewTapName }}
+      token: "{{ "{{" }} .Env.HOMEBREW_TAP_GITHUB_TOKEN {{ "}}" }}"
+    directory: Formula
+    homepage: "https://github.com/{{ .Release.Repo }}"
+    description: "Agent-first CLI for {{ .Manifest.Title }}"
+    license: "MIT"
+    install: |
+      bin.install "{{ .Manifest.Name }}"
+    test: |
+      system "#{bin}/{{ .Manifest.Name }}", "help"
+{{- end }}

@@ -1,0 +1,58 @@
+# Releasing {{ .Manifest.Name }}
+
+This generated CLI already includes release scaffolding for native binaries, checksums, and an install script.
+
+## What gets published
+
+- Darwin binaries for `amd64` and `arm64`
+- Linux binaries for `amd64` and `arm64`
+- `checksums.txt`
+- GitHub release assets built from `.goreleaser.yaml`
+- `scripts/install.sh` for one-line installs
+- `scripts/install-skills.sh` for `skills.sh` installs
+{{- if .Release.HasHomebrewTap }}
+- Homebrew formula updates pushed to `{{ .Release.HomebrewTap }}`
+{{- end }}
+
+## First-time setup
+
+1. Put this generated project in its own GitHub repository.
+{{- if .Release.HasRepo }}
+   Expected repository: `{{ .Release.Repo }}`.
+{{- else }}
+   If you want the install script to work without extra env vars, regenerate with `--repo owner/name` or set `REPO=owner/name` when running `scripts/install.sh`.
+{{- end }}
+2. Create a tag like `v0.1.0` and push it.
+3. GitHub Actions runs `.github/workflows/release.yml`.
+{{- if .Release.HasHomebrewTap }}
+4. Add a `HOMEBREW_TAP_GITHUB_TOKEN` repository secret with push access to `{{ .Release.HomebrewTap }}`.
+{{- end }}
+
+## Local release
+
+```bash
+go install github.com/goreleaser/goreleaser/v2@latest
+goreleaser release --clean
+```
+
+## Install paths for users
+
+Direct install script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/{{ if .Release.HasRepo }}{{ .Release.Repo }}{{ else }}OWNER/REPO{{ end }}/main/scripts/install.sh | sh
+```
+
+Install primary skills into `skills.sh`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/{{ if .Release.HasRepo }}{{ .Release.Repo }}{{ else }}OWNER/REPO{{ end }}/main/scripts/install-skills.sh | sh
+```
+{{- if .Release.HasHomebrewTap }}
+
+Homebrew:
+
+```bash
+brew install {{ .Release.HomebrewTap }}/{{ .Manifest.Name }}
+```
+{{- end }}

@@ -1,0 +1,152 @@
+# {{ .Manifest.Name }}
+
+Agent-first CLI generated from an OpenAPI spec.
+
+## Install
+{{- if .Release.HasRepo }}
+
+Direct install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/{{ .Release.Repo }}/main/scripts/install.sh | sh
+```
+{{- else }}
+
+This generated project includes release scaffolding for native binaries and an install script, but the install command is only turnkey after you publish the project in a GitHub repository. Regenerate with `--repo owner/name`, or set `REPO=owner/name` when using `scripts/install.sh`.
+{{- end }}
+{{- if .Release.HasHomebrewTap }}
+
+Homebrew:
+
+```bash
+brew install {{ .Release.HomebrewTap }}/{{ .Manifest.Name }}
+```
+{{- end }}
+
+Source build:
+
+```bash
+go build .
+```
+
+## Skills
+{{- if .Release.HasRepo }}
+
+Install the primary skills into `skills.sh`:
+
+```bash
+npx skills add https://github.com/{{ .Release.Repo }} --skill {{ .Skills.Install }}
+npx skills add https://github.com/{{ .Release.Repo }} --skill {{ .Skills.Shared }}
+```
+
+Or use the helper script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/{{ .Release.Repo }}/main/scripts/install-skills.sh | sh
+```
+{{- else }}
+
+This generated project includes `skills/` and `scripts/install-skills.sh`, but the `skills.sh` install path is turnkey only after the project is published in a GitHub repository. Regenerate with `--repo owner/name`, or set `REPO_URL=https://github.com/owner/name` when using `scripts/install-skills.sh`.
+{{- end }}
+
+{{ if .Skills.Tags }}
+Optional tag-level skills:
+
+{{ range .Skills.Tags }}
+- `{{ . }}`
+{{ end }}
+{{ end }}
+
+## Design
+
+- Operation-centric interface optimized for LLMs, with deterministic aliases where possible
+- JSON input via `--params` and `--body`
+- Location-aware params via `path`, `query`, `header`, and `cookie` blocks
+- Local request validation via the embedded OpenAPI schema
+- Local auth validation before send
+- `--dry-run` for request planning
+- JSON manifests, schema introspection, and examples
+- Environment-driven authentication
+
+## Commands
+
+- `{{ .Manifest.Name }} operations`
+- `{{ .Manifest.Name }} schema <operation-id-or-alias>`
+- `{{ .Manifest.Name }} example <operation-id-or-alias> --kind body|params|response`
+- `{{ .Manifest.Name }} call <operation-id-or-alias> --params '{...}' --body '{...}'`
+- `{{ .Manifest.Name }} auth`
+- `{{ .Manifest.Name }} spec`
+
+## Environment
+
+- `{{ .Manifest.Env.BaseURL }}`: absolute API base URL override. Use this to bypass the spec's server defaults or server-variable substitution.
+- `{{ .Manifest.Env.HeadersJSON }}`: optional JSON object of extra headers.
+- `{{ .Manifest.Env.OverridesJSON }}`: optional JSON object for undeclared auth and endpoint-specific input rules.
+{{- range .Manifest.ServerVars }}
+- `{{ .EnvVar }}`: value for the `{{ .Name }}` server variable. Defaults to `{{ .Default }}`{{ if .Description }}. {{ .Description }}{{ end }}
+{{- end }}
+{{- range .Manifest.Auth }}
+- `{{ .EnvVar }}`: {{ .Description }}
+{{- if .ClientCredentials }}
+- `{{ .ClientCredentials.TokenURLEnv }}`: OAuth2 client credentials token URL override{{ if .ClientCredentials.TokenURL }}. Defaults to `{{ .ClientCredentials.TokenURL }}`{{ end }}
+- `{{ .ClientCredentials.ClientIDEnv }}`: OAuth2 client credentials client ID.
+- `{{ .ClientCredentials.ClientSecretEnv }}`: OAuth2 client credentials client secret.
+- `{{ .ClientCredentials.AudienceEnv }}`: optional OAuth2 audience value.
+- `{{ .ClientCredentials.ScopesEnv }}`: optional extra OAuth2 scopes, space or comma separated.
+{{- end }}
+{{- end }}
+
+## Runtime Overrides
+
+Use `{{ .Manifest.Env.HeadersJSON }}` for plain extra headers such as version pinning or undeclared non-auth headers.
+Use `{{ .Manifest.Env.OverridesJSON }}` when the spec is missing auth metadata or a live endpoint has conditional input rules the spec does not express.
+
+Header example:
+
+```bash
+export {{ .Manifest.Env.HeadersJSON }}='{"Clerk-API-Version":"2025-11-10"}'
+{{ .Manifest.Name }} call {{ .ExampleOperation }}
+```
+
+Auth override example:
+
+```bash
+export API_TOKEN=...
+export {{ .Manifest.Env.OverridesJSON }}='{"auth":{"headers":[{"name":"Authorization","env":"API_TOKEN","prefix":"Bearer ","required":true,"secret":true}]}}'
+{{ .Manifest.Name }} call {{ .ExampleOperation }}
+```
+
+Conditional requirement example:
+
+```bash
+export {{ .Manifest.Env.OverridesJSON }}='{"operations":{"{{ .ExampleOperation }}":{"requirements":[{"when":[{"location":"query","name":"state","oneOf":["stopped","destroyed"]}],"require":[{"location":"query","name":"instance_id"}],"message":"query.instance_id is required when query.state is stopped or destroyed"}]}}}'
+{{ .Manifest.Name }} call {{ .ExampleOperation }} --params '{"query":{"state":"stopped","instance_id":"..."}}'
+```
+
+## Example
+
+```bash
+{{ .Manifest.Name }} schema {{ .ExampleOperation }}
+{{ .Manifest.Name }} example {{ .ExampleOperation }} --kind params
+{{ .Manifest.Name }} call {{ .ExampleOperation }} --params '{"query":{}}' --dry-run
+```
+
+## Notes
+
+- If the source spec only failed validation because of bad examples or bad defaults, the generator stripped those fields and kept the validated structure.
+- HTTP basic auth env vars accept either raw `username:password` or pre-encoded `base64(username:password)`.
+
+## Distribution
+
+This generated project includes:
+
+- `.goreleaser.yaml` for cross-platform release builds and checksums
+- `scripts/install.sh` for direct binary install
+- `scripts/install-skills.sh` for `skills.sh` installation
+- `.github/workflows/release.yml` for tag-driven GitHub releases
+- `skills/{{ .Manifest.Name }}-install/SKILL.md` for agent bootstrap and install guidance
+{{- if .Release.HasHomebrewTap }}
+- Homebrew publishing config for `{{ .Release.HomebrewTap }}`
+{{- end }}
+
+See `RELEASING.md` for the maintainer workflow.

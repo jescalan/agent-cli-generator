@@ -1,0 +1,38 @@
+#!/usr/bin/env sh
+set -eu
+
+REPO_URL="${REPO_URL:-{{- if .Release.HasRepo -}}https://github.com/{{ .Release.Repo }}{{- end -}}}"
+DEFAULT_SKILLS="{{- range $index, $skill := .Skills.Core }}{{ if $index }} {{ end }}{{ $skill }}{{- end }}"
+ALL_SKILLS="{{- range $index, $skill := .Skills.All }}{{ if $index }} {{ end }}{{ $skill }}{{- end }}"
+INSTALL_ALL_SKILLS="${INSTALL_ALL_SKILLS:-0}"
+SKILLS="${SKILLS:-}"
+
+if [ -z "$REPO_URL" ]; then
+  echo "REPO_URL is not configured. Regenerate this project with --repo owner/name or set REPO_URL=https://github.com/owner/name before running this installer." >&2
+  exit 1
+fi
+
+if ! command -v npx >/dev/null 2>&1; then
+  echo "missing required command: npx" >&2
+  exit 1
+fi
+
+if [ -z "$SKILLS" ]; then
+  if [ "$INSTALL_ALL_SKILLS" = "1" ]; then
+    SKILLS="$ALL_SKILLS"
+  else
+    SKILLS="$DEFAULT_SKILLS"
+  fi
+fi
+
+install_skill() {
+  skill_name="$1"
+  echo "installing ${skill_name} from ${REPO_URL}"
+  npx skills add "$REPO_URL" --skill "$skill_name"
+}
+
+for skill_name in $SKILLS; do
+  install_skill "$skill_name"
+done
+
+echo "installed skills: $SKILLS"
