@@ -19,6 +19,13 @@ This project does not try to build a pleasant human CLI. It builds a regular, lo
 
 This project is usable today for JSON-first APIs and has been exercised against real OpenAPI specs from Clerk, Tailscale, Supabase, Fly Machines, Resend, GitHub, Nylas, Customer.io, Kinde, and YNAB.
 
+The best-tested path today is:
+
+- JSON request and response bodies
+- standard header, query, cookie, and bearer auth
+- OAuth2 `client_credentials`
+- standalone GitHub-distributed generated CLIs with release binaries and skills
+
 ## Why this shape
 
 Human CLIs optimize for memorability and hand typing. Agents do not need that. Agents need:
@@ -57,13 +64,13 @@ Canonical operation IDs remain the source of truth. Aliases are additive: they h
 
 ## Install
 
-Direct install:
+Recommended direct install:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jescalan/agent-cli-generator/main/scripts/install.sh | sh
 ```
 
-Homebrew:
+Homebrew, after the first tagged release:
 
 ```bash
 brew install jescalan/tap/agent-cli-generator
@@ -83,16 +90,40 @@ go build .
 
 This repo also includes `.goreleaser.yaml`, `.github/workflows/release.yml`, and [RELEASING.md](RELEASING.md), so the generator itself ships the same release shape it generates for other APIs.
 
-## Generator usage
+## Quick start
+
+Install the generator, then generate a standalone CLI project:
 
 ```bash
-go run . generate \
+agent-cli-generator generate \
   --spec https://example.com/openapi.yaml \
   --output ./out/my-api-cli \
   --name myapi \
   --repo acme/myapi-cli \
   --homebrew-tap acme/homebrew-tap \
   --build
+```
+
+That command writes a standalone project into `./out/my-api-cli`. If you pass `--build`, it also produces a native binary at `./out/my-api-cli/bin/myapi`.
+
+Typical next steps:
+
+1. Read the generated `README.md`.
+2. Run the generated CLI's `auth`, `operations`, and `schema` commands.
+3. Publish the generated project in its own GitHub repo so users can install its binary and skills.
+
+When contributing locally from a checkout, the equivalent development command is:
+
+```bash
+go run . generate ...
+```
+
+## Generator usage
+
+Once installed, the generator interface is:
+
+```bash
+agent-cli-generator generate --spec <path-or-url> --output <dir> [flags]
 ```
 
 Flags:
@@ -108,7 +139,9 @@ Flags:
 
 ## Generated project
 
-The generator emits a standalone Go project with:
+The output is a standalone Go project for the target API, not a dependency on this repo.
+
+It includes:
 
 - an embedded normalized OpenAPI document
 - an operation manifest
@@ -117,8 +150,6 @@ The generator emits a standalone Go project with:
 - a `skills/` directory with shared and tag-level skills
 - release scaffolding: `.goreleaser.yaml`, `scripts/install.sh`, `scripts/install-skills.sh`, `RELEASING.md`, and a GitHub Actions release workflow
 - an install/bootstrap skill for agents alongside the operation skills
-
-The generated binary does not depend on this repo at runtime.
 
 If you pass `--build`, the generated project also produces a single native binary at `bin/<name>`.
 
@@ -131,7 +162,7 @@ For bearer-style APIs, the generated CLI can now work in two modes:
 
 If the OpenAPI spec declares an OAuth2 `clientCredentials` flow, the token URL comes from the spec automatically. If it does not, the generated CLI still exposes the same env contract so you can configure token acquisition manually for bearer-only specs such as Kinde.
 
-## Maintainer workflow
+## Publishing a generated CLI
 
 If you are adding this to your own API project, the intended path is:
 
@@ -144,6 +175,27 @@ If you are adding this to your own API project, the intended path is:
 That makes the generated CLI the stable distribution artifact for your API.
 
 If you want the generated skills to be easy to load into `skills.sh`, publish the generated repo on GitHub and keep the generated `skills/` directory in the repository. The generated project includes `scripts/install-skills.sh` and README instructions for that flow.
+
+## What your users should do
+
+The message to your users should be simple:
+
+1. Install the generated CLI with `scripts/install.sh`, Homebrew, or a release binary.
+2. Load the generated install skill and shared skill into `skills.sh` with `scripts/install-skills.sh`, or with `npx skills add https://github.com/owner/repo --skill <skill-name>`.
+3. Run `<cli> auth` to see required env vars.
+4. Use `<cli> operations`, `<cli> schema`, and `<cli> example` before making calls.
+5. Use `<cli> call --dry-run` before mutating requests.
+
+Your users should not need to read the raw OpenAPI spec. The generated CLI and skills should become the agent-facing contract.
+
+If you want to hand your own users a copy-paste onboarding path, the generated project already contains it:
+
+- the generated `README.md`
+- `scripts/install.sh`
+- `scripts/install-skills.sh`
+- `RELEASING.md`
+- `skills/<cli>-install/SKILL.md`
+- `skills/<cli>-shared/SKILL.md`
 
 ## Contributing With AI Agents
 
@@ -167,28 +219,6 @@ The most useful contribution pattern is still spec hardening:
 3. fix generator or runtime issues exposed by that API
 4. add regression coverage so the same class of spec never breaks again
 
-## What to tell your users
-
-The message to your users should be simple:
-
-1. Install the CLI with the generated `scripts/install.sh`, Homebrew, or a direct release binary.
-2. Load the generated install skill and shared skill into `skills.sh` with the generated `scripts/install-skills.sh`, or with `npx skills add https://github.com/owner/repo --skill <skill-name>`.
-3. Run `<cli> auth` to see required env vars.
-4. Use `<cli> operations`, `<cli> schema`, and `<cli> example` before making calls.
-5. Use `<cli> call --dry-run` before mutating requests.
-
-In other words, your users should not need to read the raw OpenAPI spec. The generated CLI and skills should become the agent-facing contract.
-
-The generator itself now follows that same distribution model: direct install script first, Homebrew on macOS, and Go only as a fallback.
-
-If you want to hand your own users a copy-paste onboarding path, the generated project already contains it:
-
-- the generated `README.md`
-- `scripts/install.sh`
-- `RELEASING.md`
-- `skills/<cli>-install/SKILL.md`
-- `skills/<cli>-shared/SKILL.md`
-
 ## Development
 
 Useful local checks:
@@ -203,7 +233,7 @@ go tool cover -func=/tmp/agent-cli-generator.cover
 
 The root CLI is intentionally small. Most behavior lives under `internal/generator`, and the test suite leans heavily on end-to-end generation tests that build and execute generated CLIs.
 
-## Runtime Overrides
+## When specs are incomplete
 
 Use the generated `*_HEADERS_JSON` env var for plain extra headers such as version pinning or undeclared non-auth headers.
 
@@ -235,9 +265,9 @@ The same override layer can enforce live endpoint preconditions before the netwo
 export FLYMACHINES_OVERRIDES_JSON='{"operations":{"Machines_wait":{"requirements":[{"when":[{"location":"query","name":"state","oneOf":["stopped","destroyed"]}],"require":[{"location":"query","name":"instance_id"}],"message":"query.instance_id is required when query.state is stopped or destroyed"}]}}}'
 ```
 
-Some APIs also expose operation scope requirements outside the standard OAuth security block. The generator now carries those through into the operation manifest and generated schema output, and the runtime will preflight JWT-backed bearer tokens when it can decode their granted scopes.
+Some APIs also expose operation scope requirements outside the standard OAuth security block. The generator carries those through into the operation manifest and generated schema output, and the runtime preflights JWT-backed bearer tokens when it can decode their granted scopes.
 
-## Notes
+## Current limits
 
 - The loader normalizes common OpenAPI 3.1 features that `kin-openapi` still handles unevenly, including numeric `exclusiveMinimum`, numeric `exclusiveMaximum`, `["type", "null"]` unions, schema-level `examples`, array unions without top-level `items`, and empty top-level `webhooks`.
 - Swagger 2.0 inputs are converted to OpenAPI 3 before manifest generation and runtime embedding.
