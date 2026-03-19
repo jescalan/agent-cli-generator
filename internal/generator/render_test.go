@@ -73,6 +73,7 @@ func TestRenderInstallSkillMentionsPreferredInstallPaths(t *testing.T) {
 	})
 
 	for _, snippet := range []string{
+		"sh scripts/ensure-cli.sh",
 		"curl -fsSL https://raw.githubusercontent.com/acme/example-cli/main/scripts/install.sh | sh",
 		"brew install acme/homebrew-tap/example",
 		"Run `example auth`",
@@ -115,9 +116,14 @@ func TestBuildSkillConfigIncludesCoreAndTagSkills(t *testing.T) {
 			t.Fatalf("All missing %q: %#v", want, skills.All)
 		}
 	}
-	for _, want := range []string{"example-install", "example-shared"} {
+	for _, want := range []string{"example-install"} {
 		if !containsString(skills.Core, want) {
 			t.Fatalf("Core missing %q: %#v", want, skills.Core)
+		}
+	}
+	for _, want := range []string{"example-install", "example-shared"} {
+		if !containsString(skills.Recommended, want) {
+			t.Fatalf("Recommended missing %q: %#v", want, skills.Recommended)
 		}
 	}
 }

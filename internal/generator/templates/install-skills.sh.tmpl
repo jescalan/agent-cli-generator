@@ -3,8 +3,10 @@ set -eu
 
 REPO_URL="${REPO_URL:-{{- if .Release.HasRepo -}}https://github.com/{{ .Release.Repo }}{{- end -}}}"
 DEFAULT_SKILLS="{{- range $index, $skill := .Skills.Core }}{{ if $index }} {{ end }}{{ $skill }}{{- end }}"
+RECOMMENDED_SKILLS="{{- range $index, $skill := .Skills.Recommended }}{{ if $index }} {{ end }}{{ $skill }}{{- end }}"
 ALL_SKILLS="{{- range $index, $skill := .Skills.All }}{{ if $index }} {{ end }}{{ $skill }}{{- end }}"
 INSTALL_ALL_SKILLS="${INSTALL_ALL_SKILLS:-0}"
+INSTALL_RECOMMENDED_SKILLS="${INSTALL_RECOMMENDED_SKILLS:-0}"
 SKILLS="${SKILLS:-}"
 
 if [ -z "$REPO_URL" ]; then
@@ -20,6 +22,8 @@ fi
 if [ -z "$SKILLS" ]; then
   if [ "$INSTALL_ALL_SKILLS" = "1" ]; then
     SKILLS="$ALL_SKILLS"
+  elif [ "$INSTALL_RECOMMENDED_SKILLS" = "1" ]; then
+    SKILLS="$RECOMMENDED_SKILLS"
   else
     SKILLS="$DEFAULT_SKILLS"
   fi

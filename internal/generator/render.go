@@ -34,11 +34,12 @@ type ReleaseConfig struct {
 }
 
 type SkillConfig struct {
-	Install string
-	Shared  string
-	Tags    []string
-	Core    []string
-	All     []string
+	Install     string
+	Shared      string
+	Tags        []string
+	Core        []string
+	Recommended []string
+	All         []string
 }
 
 func newTemplateData(manifest Manifest, moduleName string, opts Options) templateData {
@@ -151,14 +152,16 @@ func buildSkillConfig(manifest Manifest) SkillConfig {
 	}
 	sort.Strings(tags)
 
-	core := []string{installName, sharedName}
-	all := append(append([]string{}, core...), tags...)
+	core := []string{installName}
+	recommended := []string{installName, sharedName}
+	all := append(append([]string{}, recommended...), tags...)
 	return SkillConfig{
-		Install: installName,
-		Shared:  sharedName,
-		Tags:    tags,
-		Core:    core,
-		All:     all,
+		Install:     installName,
+		Shared:      sharedName,
+		Tags:        tags,
+		Core:        core,
+		Recommended: recommended,
+		All:         all,
 	}
 }
 
@@ -176,6 +179,13 @@ func writeSkills(outputDir string, manifest Manifest, release ReleaseConfig) err
 	}
 	if err := os.WriteFile(installName, []byte(renderInstallSkill(manifest, release)), 0o644); err != nil {
 		return fmt.Errorf("write install skill: %w", err)
+	}
+	installScriptName := filepath.Join(skillsDir, skillConfig.Install, "scripts", "ensure-cli.sh")
+	if err := os.MkdirAll(filepath.Dir(installScriptName), 0o755); err != nil {
+		return fmt.Errorf("create install skill scripts directory: %w", err)
+	}
+	if err := os.WriteFile(installScriptName, []byte(renderInstallSkillBootstrapScript(manifest, release)), 0o755); err != nil {
+		return fmt.Errorf("write install skill bootstrap script: %w", err)
 	}
 
 	sharedName := filepath.Join(skillsDir, skillConfig.Shared, "SKILL.md")
@@ -220,13 +230,19 @@ func renderInstallSkill(manifest Manifest, release ReleaseConfig) string {
 	var builder strings.Builder
 	builder.WriteString("---\n")
 	builder.WriteString("name: " + manifest.Name + "-install\n")
-	builder.WriteString("description: Install and bootstrap the generated " + manifest.Name + " CLI before use.\n")
+	builder.WriteString("description: Primary entrypoint for installing and bootstrapping the generated " + manifest.Name + " CLI.\n")
 	builder.WriteString("---\n\n")
 	builder.WriteString("# " + manifest.Name + " Install Skill\n\n")
-	builder.WriteString("Use this skill when the `" + manifest.Name + "` binary is missing or not yet configured.\n\n")
-	builder.WriteString("## Install order\n\n")
+	builder.WriteString("Use this skill as the primary entrypoint for the `" + manifest.Name + "` CLI.\n\n")
+	builder.WriteString("## First step\n\n")
+	builder.WriteString("Always make sure the CLI exists before using it:\n\n")
+	builder.WriteString("```bash\n")
+	builder.WriteString("sh scripts/ensure-cli.sh\n")
+	builder.WriteString("```\n\n")
+	builder.WriteString("That script exits cleanly if `" + manifest.Name + "` is already on `PATH`. If it is missing, the script installs it from the published release.\n\n")
+	builder.WriteString("## If bootstrap cannot install the CLI\n\n")
 	if release.HasRepo {
-		builder.WriteString("1. Prefer the release installer:\n\n")
+		builder.WriteString("1. Use the published installer directly:\n\n")
 		builder.WriteString("   ```bash\n")
 		builder.WriteString("   curl -fsSL https://raw.githubusercontent.com/" + release.Repo + "/main/scripts/install.sh | sh\n")
 		builder.WriteString("   ```\n\n")
@@ -247,13 +263,34 @@ func renderInstallSkill(manifest Manifest, release ReleaseConfig) string {
 	builder.WriteString("   ```bash\n")
 	builder.WriteString("   go build .\n")
 	builder.WriteString("   ```\n\n")
-	builder.WriteString("## Bootstrap\n\n")
-	builder.WriteString("After installation:\n\n")
+	builder.WriteString("## Use the CLI\n\n")
+	builder.WriteString("After the CLI exists:\n\n")
 	builder.WriteString("1. Run `" + manifest.Name + " auth` to discover required env vars.\n")
 	builder.WriteString("2. Set the auth env vars.\n")
 	builder.WriteString("3. Run `" + manifest.Name + " operations`.\n")
 	builder.WriteString("4. Run `" + manifest.Name + " schema <operation-id-or-alias>` before calling anything.\n")
 	builder.WriteString("5. Run `" + manifest.Name + " call <operation-id-or-alias> --dry-run` before mutating requests.\n")
+	builder.WriteString("\nInstall the shared skill or tag skills if you want more detailed operation guidance.\n")
+	return builder.String()
+}
+
+func renderInstallSkillBootstrapScript(manifest Manifest, release ReleaseConfig) string {
+	var builder strings.Builder
+	builder.WriteString("#!/usr/bin/env sh\n")
+	builder.WriteString("set -eu\n\n")
+	builder.WriteString("BINARY=\"" + manifest.Name + "\"\n")
+	builder.WriteString("if command -v \"$BINARY\" >/dev/null 2>&1; then\n")
+	builder.WriteString("  echo \"found ${BINARY} at $(command -v \"$BINARY\")\"\n")
+	builder.WriteString("  exit 0\n")
+	builder.WriteString("fi\n\n")
+	if release.HasRepo {
+		builder.WriteString("curl -fsSL https://raw.githubusercontent.com/" + release.Repo + "/main/scripts/install.sh | sh\n")
+		builder.WriteString("exit 0\n")
+	} else {
+		builder.WriteString("echo \"" + manifest.Name + " is not on PATH and this project has not been published with a configured repo yet.\" >&2\n")
+		builder.WriteString("echo \"Install it manually or publish the generated project with --repo owner/name.\" >&2\n")
+		builder.WriteString("exit 1\n")
+	}
 	return builder.String()
 }
 

@@ -1857,6 +1857,7 @@ func TestGenerateWritesReleaseScaffoldingAndInstallSkill(t *testing.T) {
 		filepath.Join(outputDir, "scripts", "install-skills.sh"),
 		filepath.Join(outputDir, ".github", "workflows", "release.yml"),
 		filepath.Join(outputDir, "skills", "releaseapi-install", "SKILL.md"),
+		filepath.Join(outputDir, "skills", "releaseapi-install", "scripts", "ensure-cli.sh"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected generated file %s: %v", path, err)
@@ -1873,6 +1874,9 @@ func TestGenerateWritesReleaseScaffoldingAndInstallSkill(t *testing.T) {
 	}
 	if !strings.Contains(readme, "npx skills add https://github.com/acme/releaseapi --skill releaseapi-install") {
 		t.Fatalf("generated README missing skills.sh install command: %s", readme)
+	}
+	if !strings.Contains(readme, "That installs `releaseapi-install` by default.") {
+		t.Fatalf("generated README missing install-skill default explanation: %s", readme)
 	}
 	if !strings.Contains(readme, "brew install acme/homebrew-tap/releaseapi") {
 		t.Fatalf("generated README missing Homebrew install command: %s", readme)
@@ -1895,6 +1899,9 @@ func TestGenerateWritesReleaseScaffoldingAndInstallSkill(t *testing.T) {
 		t.Fatalf("read install skill: %v", err)
 	}
 	installSkill := string(installSkillBytes)
+	if !strings.Contains(installSkill, "sh scripts/ensure-cli.sh") {
+		t.Fatalf("install skill missing ensure-cli bootstrap step: %s", installSkill)
+	}
 	if !strings.Contains(installSkill, "curl -fsSL https://raw.githubusercontent.com/acme/releaseapi/main/scripts/install.sh | sh") {
 		t.Fatalf("install skill missing installer command: %s", installSkill)
 	}
@@ -1938,8 +1945,26 @@ func TestGenerateWritesReleaseScaffoldingAndInstallSkill(t *testing.T) {
 	if !strings.Contains(skillScript, "npx skills add") {
 		t.Fatalf("skills install script missing skills.sh command: %s", skillScript)
 	}
-	if !strings.Contains(skillScript, "releaseapi-install") || !strings.Contains(skillScript, "releaseapi-shared") {
-		t.Fatalf("skills install script missing core skills: %s", skillScript)
+	if !strings.Contains(skillScript, "DEFAULT_SKILLS=\"releaseapi-install\"") {
+		t.Fatalf("skills install script missing install-skill default: %s", skillScript)
+	}
+	if !strings.Contains(skillScript, "RECOMMENDED_SKILLS=\"releaseapi-install releaseapi-shared\"") {
+		t.Fatalf("skills install script missing recommended skill set: %s", skillScript)
+	}
+	if !strings.Contains(skillScript, "ALL_SKILLS=") || !strings.Contains(skillScript, "releaseapi-shared") {
+		t.Fatalf("skills install script missing full skill support: %s", skillScript)
+	}
+
+	ensureScriptBytes, err := os.ReadFile(filepath.Join(outputDir, "skills", "releaseapi-install", "scripts", "ensure-cli.sh"))
+	if err != nil {
+		t.Fatalf("read ensure-cli script: %v", err)
+	}
+	ensureScript := string(ensureScriptBytes)
+	if !strings.Contains(ensureScript, "command -v \"$BINARY\"") {
+		t.Fatalf("ensure-cli script missing PATH check: %s", ensureScript)
+	}
+	if !strings.Contains(ensureScript, "curl -fsSL https://raw.githubusercontent.com/acme/releaseapi/main/scripts/install.sh | sh") {
+		t.Fatalf("ensure-cli script missing release installer: %s", ensureScript)
 	}
 }
 

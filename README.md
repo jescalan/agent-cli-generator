@@ -174,14 +174,14 @@ If you are adding this to your own API project, the intended path is:
 
 That makes the generated CLI the stable distribution artifact for your API.
 
-If you want the generated skills to be easy to load into `skills.sh`, publish the generated repo on GitHub and keep the generated `skills/` directory in the repository. The generated project includes `scripts/install-skills.sh` and README instructions for that flow.
+If you want the generated skills to be easy to install for agent users, publish the generated repo on GitHub and keep the generated `skills/` directory in the repository. The generated project includes `scripts/install-skills.sh` and README instructions for that flow.
 
 ## What your users should do
 
 The message to your users should be simple:
 
-1. Install the generated CLI with `scripts/install.sh`, Homebrew, or a release binary.
-2. Load the generated install skill and shared skill into `skills.sh` with `scripts/install-skills.sh`, or with `npx skills add https://github.com/owner/repo --skill <skill-name>`.
+1. Install the generated install skill with `scripts/install-skills.sh`, or manually with `npx skills add https://github.com/owner/repo --skill <cli>-install`.
+2. Let that install skill ensure the CLI binary exists. It should install the binary if it is missing and reuse it if it is already on `PATH`.
 3. Run `<cli> auth` to see required env vars.
 4. Use `<cli> operations`, `<cli> schema`, and `<cli> example` before making calls.
 5. Use `<cli> call --dry-run` before mutating requests.
@@ -195,6 +195,7 @@ If you want to hand your own users a copy-paste onboarding path, the generated p
 - `scripts/install-skills.sh`
 - `RELEASING.md`
 - `skills/<cli>-install/SKILL.md`
+- `skills/<cli>-install/scripts/ensure-cli.sh`
 - `skills/<cli>-shared/SKILL.md`
 
 ## Contributing With AI Agents
