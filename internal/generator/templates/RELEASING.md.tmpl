@@ -9,7 +9,7 @@ This generated CLI already includes release scaffolding for native binaries, che
 - `checksums.txt`
 - GitHub release assets built from `.goreleaser.yaml`
 - `scripts/install.sh` for one-line installs
-- `scripts/install-skills.sh` for installing generated skills with the `skills` CLI
+- `scripts/install-skills.sh` for installing the generated skill with the `skills` CLI
 {{- if .Release.HasHomebrewTap }}
 - Homebrew formula updates pushed to `{{ .Release.HomebrewTap }}`
 {{- end }}
@@ -43,16 +43,10 @@ Direct install script:
 curl -fsSL https://raw.githubusercontent.com/{{ if .Release.HasRepo }}{{ .Release.Repo }}{{ else }}OWNER/REPO{{ end }}/main/scripts/install.sh | sh
 ```
 
-Install the primary bootstrap skill for the agent:
+Install the skill for the agent:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/{{ if .Release.HasRepo }}{{ .Release.Repo }}{{ else }}OWNER/REPO{{ end }}/main/scripts/install-skills.sh | sh
-```
-
-That installs the generated install skill by default. To install every generated skill at once:
-
-```bash
-INSTALL_ALL_SKILLS=1 curl -fsSL https://raw.githubusercontent.com/{{ if .Release.HasRepo }}{{ .Release.Repo }}{{ else }}OWNER/REPO{{ end }}/main/scripts/install-skills.sh | sh
+npx skills add https://github.com/{{ if .Release.HasRepo }}{{ .Release.Repo }}{{ else }}OWNER/REPO{{ end }}
 ```
 {{- if .Release.HasHomebrewTap }}
 

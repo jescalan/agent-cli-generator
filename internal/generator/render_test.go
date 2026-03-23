@@ -57,11 +57,23 @@ func TestBuildReleaseConfigUsesOverrideOrInfersFromModule(t *testing.T) {
 	}
 }
 
-func TestRenderInstallSkillMentionsPreferredInstallPaths(t *testing.T) {
+func TestRenderSkillContainsAllSections(t *testing.T) {
 	t.Parallel()
 
-	manifest := Manifest{Name: "example"}
-	skill := renderInstallSkill(manifest, ReleaseConfig{
+	manifest := Manifest{
+		Name:  "example",
+		Title: "Example API",
+		Env: EnvConfig{
+			BaseURL:       "EXAMPLE_BASE_URL",
+			HeadersJSON:   "EXAMPLE_HEADERS_JSON",
+			OverridesJSON: "EXAMPLE_OVERRIDES_JSON",
+		},
+		Operations: []OperationManifest{
+			{ID: "users.list", Summary: "List users", Tags: []string{"Users"}},
+			{ID: "admin.reset", Summary: "Reset admin", Tags: []string{"Admin"}},
+		},
+	}
+	skill := renderSkill(manifest, ReleaseConfig{
 		Repo:             "acme/example-cli",
 		HasRepo:          true,
 		HomebrewTap:      "acme/homebrew-tap",
@@ -73,19 +85,28 @@ func TestRenderInstallSkillMentionsPreferredInstallPaths(t *testing.T) {
 	})
 
 	for _, snippet := range []string{
+		"name: example\n",
+		"## Setup",
 		"sh scripts/ensure-cli.sh",
 		"curl -fsSL https://raw.githubusercontent.com/acme/example-cli/main/scripts/install.sh | sh",
 		"brew install acme/homebrew-tap/example",
-		"Run `example auth`",
-		"call <operation-id-or-alias> --dry-run",
+		"## Usage",
+		"schema-first flow",
+		"## Auth",
+		"EXAMPLE_BASE_URL",
+		"## Operations",
+		"### Users",
+		"`users.list`: List users",
+		"### Admin",
+		"`admin.reset`: Reset admin",
 	} {
 		if !strings.Contains(skill, snippet) {
-			t.Fatalf("install skill missing %q:\n%s", snippet, skill)
+			t.Fatalf("skill missing %q:\n%s", snippet, skill)
 		}
 	}
 }
 
-func TestBuildSkillConfigIncludesCoreAndTagSkills(t *testing.T) {
+func TestBuildSkillConfigReturnsName(t *testing.T) {
 	t.Parallel()
 
 	manifest := Manifest{
@@ -98,41 +119,7 @@ func TestBuildSkillConfigIncludesCoreAndTagSkills(t *testing.T) {
 	}
 
 	skills := buildSkillConfig(manifest)
-	if skills.Install != "example-install" {
-		t.Fatalf("Install = %q", skills.Install)
+	if skills.Name != "example" {
+		t.Fatalf("Name = %q, want %q", skills.Name, "example")
 	}
-	if skills.Shared != "example-shared" {
-		t.Fatalf("Shared = %q", skills.Shared)
-	}
-	for _, want := range []string{
-		"example-general",
-		"example-users",
-		"example-admin-tools",
-	} {
-		if !containsString(skills.Tags, want) {
-			t.Fatalf("Tags missing %q: %#v", want, skills.Tags)
-		}
-		if !containsString(skills.All, want) {
-			t.Fatalf("All missing %q: %#v", want, skills.All)
-		}
-	}
-	for _, want := range []string{"example-install"} {
-		if !containsString(skills.Core, want) {
-			t.Fatalf("Core missing %q: %#v", want, skills.Core)
-		}
-	}
-	for _, want := range []string{"example-install", "example-shared"} {
-		if !containsString(skills.Recommended, want) {
-			t.Fatalf("Recommended missing %q: %#v", want, skills.Recommended)
-		}
-	}
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }

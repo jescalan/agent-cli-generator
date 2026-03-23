@@ -7,8 +7,21 @@ import (
 	"fmt"
 	"os"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/jescalan/agent-cli-generator/internal/generator"
 )
+
+type configFile struct {
+	Spec        string `yaml:"spec"`
+	Output      string `yaml:"output"`
+	Name        string `yaml:"name"`
+	Module      string `yaml:"module"`
+	Repo        string `yaml:"repo"`
+	HomebrewTap string `yaml:"homebrew_tap"`
+	Build       bool   `yaml:"build"`
+	Overwrite   bool   `yaml:"overwrite"`
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -35,17 +48,22 @@ func run(args []string) error {
 }
 
 func runGenerate(args []string) error {
+	cfg, err := loadConfigFile()
+	if err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
-	specPath := fs.String("spec", "", "Path or URL to an OpenAPI 3.0/3.1 or Swagger 2.0 spec")
-	outputDir := fs.String("output", "", "Directory to write the generated CLI project into")
-	name := fs.String("name", "", "Binary name for the generated CLI")
-	moduleName := fs.String("module", "", "Go module name for the generated CLI")
-	repo := fs.String("repo", "", "GitHub repository in owner/name form for generated release/install scaffolding")
-	homebrewTap := fs.String("homebrew-tap", "", "GitHub tap repository in owner/name form for generated Homebrew publishing config")
-	build := fs.Bool("build", false, "Run go build in the generated project")
-	overwrite := fs.Bool("overwrite", false, "Allow writing into an existing directory")
+	specPath := fs.String("spec", cfg.Spec, "Path or URL to an OpenAPI 3.0/3.1 or Swagger 2.0 spec")
+	outputDir := fs.String("output", cfg.Output, "Directory to write the generated CLI project into")
+	name := fs.String("name", cfg.Name, "Binary name for the generated CLI")
+	moduleName := fs.String("module", cfg.Module, "Go module name for the generated CLI")
+	repo := fs.String("repo", cfg.Repo, "GitHub repository in owner/name form for generated release/install scaffolding")
+	homebrewTap := fs.String("homebrew-tap", cfg.HomebrewTap, "GitHub tap repository in owner/name form for generated Homebrew publishing config")
+	build := fs.Bool("build", cfg.Build, "Run go build in the generated project")
+	overwrite := fs.Bool("overwrite", cfg.Overwrite, "Allow writing into an existing directory")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -70,6 +88,24 @@ func runGenerate(args []string) error {
 	})
 }
 
+func loadConfigFile() (configFile, error) {
+	for _, name := range []string{"agent-cli.yml", "agent-cli.yaml"} {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return configFile{}, fmt.Errorf("read %s: %w", name, err)
+		}
+		var cfg configFile
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return configFile{}, fmt.Errorf("parse %s: %w", name, err)
+		}
+		return cfg, nil
+	}
+	return configFile{}, nil
+}
+
 func printUsage() {
 	payload := map[string]any{
 		"name":        "agent-cli-generator",
@@ -90,6 +126,7 @@ func printUsage() {
 				},
 			},
 		},
+		"config":  "Optional: place an agent-cli.yml in the working directory to set defaults for all flags.",
 		"example": "agent-cli-generator generate --spec https://example.com/openapi.yaml --output ./out/execos-cli --name execos --build",
 	}
 	blob, _ := json.MarshalIndent(payload, "", "  ")

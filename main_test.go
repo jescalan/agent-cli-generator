@@ -85,6 +85,156 @@ func TestRunGenerateWritesProject(t *testing.T) {
 	}
 }
 
+func TestConfigFileProvideDefaults(t *testing.T) {
+	specPath := filepath.Join(t.TempDir(), "openapi.json")
+	spec := `{
+	  "openapi": "3.0.3",
+	  "info": { "title": "Config API", "version": "1.0.0" },
+	  "paths": {
+	    "/ping": {
+	      "get": {
+	        "operationId": "ping.get",
+	        "responses": { "200": { "description": "ok" } }
+	      }
+	    }
+	  }
+	}`
+	if err := os.WriteFile(specPath, []byte(spec), 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "out")
+	configDir := t.TempDir()
+	configContent := "spec: " + specPath + "\noutput: " + outputDir + "\nname: configapi\n"
+	if err := os.WriteFile(filepath.Join(configDir, "agent-cli.yml"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(configDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	if err := runGenerate(nil); err != nil {
+		t.Fatalf("runGenerate with config file returned error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(outputDir, "main.go")); err != nil {
+		t.Fatalf("expected generated file main.go: %v", err)
+	}
+}
+
+func TestConfigFileFlagOverride(t *testing.T) {
+	specPath := filepath.Join(t.TempDir(), "openapi.json")
+	spec := `{
+	  "openapi": "3.0.3",
+	  "info": { "title": "Override API", "version": "1.0.0" },
+	  "paths": {
+	    "/ping": {
+	      "get": {
+	        "operationId": "ping.get",
+	        "responses": { "200": { "description": "ok" } }
+	      }
+	    }
+	  }
+	}`
+	if err := os.WriteFile(specPath, []byte(spec), 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "out")
+	configDir := t.TempDir()
+	configContent := "spec: /nonexistent/spec.json\noutput: /nonexistent/out\nname: wrongname\n"
+	if err := os.WriteFile(filepath.Join(configDir, "agent-cli.yml"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(configDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	if err := runGenerate([]string{"--spec", specPath, "--output", outputDir, "--name", "overrideapi"}); err != nil {
+		t.Fatalf("runGenerate with flag override returned error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(outputDir, "main.go")); err != nil {
+		t.Fatalf("expected generated file main.go: %v", err)
+	}
+}
+
+func TestMissingConfigFileIsNotAnError(t *testing.T) {
+	configDir := t.TempDir()
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(configDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	err := runGenerate(nil)
+	if err == nil || !strings.Contains(err.Error(), "missing required --spec") {
+		t.Fatalf("expected missing --spec error when no config file, got: %v", err)
+	}
+}
+
+func TestConfigFileMissingRequiredFieldsErrors(t *testing.T) {
+	configDir := t.TempDir()
+	configContent := "name: partial\n"
+	if err := os.WriteFile(filepath.Join(configDir, "agent-cli.yml"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(configDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	err := runGenerate(nil)
+	if err == nil || !strings.Contains(err.Error(), "missing required --spec") {
+		t.Fatalf("expected missing --spec error with partial config, got: %v", err)
+	}
+}
+
+func TestMalformedConfigFileReturnsParseError(t *testing.T) {
+	configDir := t.TempDir()
+	configContent := "spec: [\n"
+	if err := os.WriteFile(filepath.Join(configDir, "agent-cli.yml"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(configDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	err := runGenerate(nil)
+	if err == nil || !strings.Contains(err.Error(), "parse agent-cli.yml") {
+		t.Fatalf("expected parse error for malformed config, got: %v", err)
+	}
+}
+
+func TestUnreadableConfigPathReturnsReadError(t *testing.T) {
+	configDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(configDir, "agent-cli.yml"), 0o755); err != nil {
+		t.Fatalf("mkdir config path: %v", err)
+	}
+
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(configDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	err := runGenerate(nil)
+	if err == nil || !strings.Contains(err.Error(), "read agent-cli.yml") {
+		t.Fatalf("expected read error for invalid config path, got: %v", err)
+	}
+}
+
 func TestPrintErrorWritesStructuredJSON(t *testing.T) {
 	output := captureStream(t, &os.Stderr, func() {
 		printError(errors.New("boom"))

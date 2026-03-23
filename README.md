@@ -106,6 +106,26 @@ agent-cli-generator generate \
 
 That command writes a standalone project into `./out/my-api-cli`. If you pass `--build`, it also produces a native binary at `./out/my-api-cli/bin/myapi`.
 
+Or commit an `agent-cli.yml` config file in the working directory and run with zero flags:
+
+```yaml
+# agent-cli.yml
+spec: ./openapi.yaml
+output: ./out/my-api-cli
+name: myapi
+module: github.com/acme/myapi-cli
+repo: acme/myapi-cli
+homebrew_tap: acme/homebrew-tap
+build: true
+overwrite: true
+```
+
+```bash
+agent-cli-generator generate
+```
+
+CLI flags override any values set in the config file.
+
 Typical next steps:
 
 1. Read the generated `README.md`.
@@ -137,6 +157,21 @@ Flags:
 - `--build`: run `go mod tidy` and `go build` in the generated project
 - `--overwrite`: allow writing into a non-empty output directory
 
+### Config file
+
+Place an `agent-cli.yml` (or `agent-cli.yaml`) in the working directory to set defaults for all flags. CLI flags override config values. The config file is optional — pure CLI usage still works exactly as before.
+
+```yaml
+spec: ./openapi.yaml
+output: ./out/my-api-cli
+name: myapi
+module: github.com/acme/myapi-cli
+repo: acme/myapi-cli
+homebrew_tap: acme/homebrew-tap
+build: true
+overwrite: true
+```
+
 ## Generated project
 
 The output is a standalone Go project for the target API, not a dependency on this repo.
@@ -147,9 +182,8 @@ It includes:
 - an operation manifest
 - a runtime that validates params and request bodies with the schema
 - a README for the generated CLI
-- a `skills/` directory with shared and tag-level skills
+- a `skills/` directory with a single consolidated skill covering setup, workflow, auth, and operations
 - release scaffolding: `.goreleaser.yaml`, `scripts/install.sh`, `scripts/install-skills.sh`, `RELEASING.md`, and a GitHub Actions release workflow
-- an install/bootstrap skill for agents alongside the operation skills
 
 If you pass `--build`, the generated project also produces a single native binary at `bin/<name>`.
 
@@ -180,13 +214,13 @@ If you want the generated skills to be easy to install for agent users, publish 
 
 The message to your users should be simple:
 
-1. Install the generated install skill with `scripts/install-skills.sh`, or manually with `npx skills add https://github.com/owner/repo --skill <cli>-install`.
-2. Let that install skill ensure the CLI binary exists. It should install the binary if it is missing and reuse it if it is already on `PATH`.
+1. Install the skill: `npx skills add https://github.com/owner/repo`.
+2. The skill ensures the CLI binary exists, teaches the agent the schema-first workflow, and lists every operation.
 3. Run `<cli> auth` to see required env vars.
 4. Use `<cli> operations`, `<cli> schema`, and `<cli> example` before making calls.
 5. Use `<cli> call --dry-run` before mutating requests.
 
-Your users should not need to read the raw OpenAPI spec. The generated CLI and skills should become the agent-facing contract.
+Your users should not need to read the raw OpenAPI spec. The generated CLI and skill should become the agent-facing contract.
 
 If you want to hand your own users a copy-paste onboarding path, the generated project already contains it:
 
@@ -194,9 +228,8 @@ If you want to hand your own users a copy-paste onboarding path, the generated p
 - `scripts/install.sh`
 - `scripts/install-skills.sh`
 - `RELEASING.md`
-- `skills/<cli>-install/SKILL.md`
-- `skills/<cli>-install/scripts/ensure-cli.sh`
-- `skills/<cli>-shared/SKILL.md`
+- `skills/<cli>/SKILL.md`
+- `skills/<cli>/scripts/ensure-cli.sh`
 
 ## Contributing With AI Agents
 

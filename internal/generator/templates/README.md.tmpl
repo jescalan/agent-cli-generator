@@ -5,10 +5,10 @@ Agent-first CLI generated from an OpenAPI spec.
 ## Skills
 {{- if .Release.HasRepo }}
 
-Primary path: install the bootstrap skill for the agent with the `skills` CLI:
+Install the skill for the agent with the `skills` CLI:
 
 ```bash
-npx skills add https://github.com/{{ .Release.Repo }} --skill {{ .Skills.Install }}
+npx skills add https://github.com/{{ .Release.Repo }}
 ```
 
 Or use the helper script:
@@ -16,32 +16,10 @@ Or use the helper script:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/{{ .Release.Repo }}/main/scripts/install-skills.sh | sh
 ```
-
-That installs `{{ .Skills.Install }}` by default. This skill should be the primary entrypoint: it checks whether `{{ .Manifest.Name }}` is already on `PATH`, installs it if needed, and then tells the agent how to use it.
-
-If you also want the shared skill immediately:
-
-```bash
-npx skills add https://github.com/{{ .Release.Repo }} --skill {{ .Skills.Shared }}
-```
-
-To install every generated skill at once:
-
-```bash
-INSTALL_ALL_SKILLS=1 curl -fsSL https://raw.githubusercontent.com/{{ .Release.Repo }}/main/scripts/install-skills.sh | sh
-```
 {{- else }}
 
 This generated project includes `skills/` and `scripts/install-skills.sh`, but the install path is turnkey only after the project is published in a GitHub repository. Regenerate with `--repo owner/name`, or set `REPO_URL=https://github.com/owner/name` when using `scripts/install-skills.sh`.
 {{- end }}
-
-{{ if .Skills.Tags }}
-
-Optional tag-level skills:
-{{ range .Skills.Tags }}
-- `{{ . }}`
-{{ end }}
-{{ end }}
 
 ## Install
 {{- if .Release.HasRepo }}
@@ -155,10 +133,10 @@ This generated project includes:
 
 - `.goreleaser.yaml` for cross-platform release builds and checksums
 - `scripts/install.sh` for direct binary install
-- `scripts/install-skills.sh` for installing generated skills with the `skills` CLI
+- `scripts/install-skills.sh` for installing the generated skill with the `skills` CLI
 - `.github/workflows/release.yml` for tag-driven GitHub releases
-- `skills/{{ .Manifest.Name }}-install/SKILL.md` for agent bootstrap and install guidance
-- `skills/{{ .Manifest.Name }}-install/scripts/ensure-cli.sh` for binary bootstrap from the install skill
+- `skills/{{ .Skills.Name }}/SKILL.md` for agent bootstrap, workflow guidance, and operation catalog
+- `skills/{{ .Skills.Name }}/scripts/ensure-cli.sh` for binary bootstrap from the skill
 {{- if .Release.HasHomebrewTap }}
 - Homebrew publishing config for `{{ .Release.HomebrewTap }}`
 {{- end }}
