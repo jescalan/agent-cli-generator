@@ -125,6 +125,62 @@ func TestConfigFileProvideDefaults(t *testing.T) {
 	}
 }
 
+func TestMinimalConfigFileSpecAndRepo(t *testing.T) {
+	specPath := filepath.Join(t.TempDir(), "openapi.json")
+	spec := `{
+	  "openapi": "3.0.3",
+	  "info": { "title": "Minimal API", "version": "1.0.0" },
+	  "paths": {
+	    "/ping": {
+	      "get": {
+	        "operationId": "ping.get",
+	        "responses": { "200": { "description": "ok" } }
+	      }
+	    }
+	  }
+	}`
+	if err := os.WriteFile(specPath, []byte(spec), 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+
+	// Config file lives in a separate dir (simulating the author's repo root).
+	// Output points to an empty dir for the first generation.
+	outputDir := filepath.Join(t.TempDir(), "out")
+	configDir := t.TempDir()
+	configContent := "spec: " + specPath + "\nrepo: acme/minimal-api\noutput: " + outputDir + "\n"
+	if err := os.WriteFile(filepath.Join(configDir, "agent-cli.yml"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(configDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	if err := runGenerate(nil); err != nil {
+		t.Fatalf("runGenerate with minimal config returned error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(outputDir, "main.go")); err != nil {
+		t.Fatalf("expected generated file main.go: %v", err)
+	}
+
+	// The module should have been inferred from the repo.
+	goModBytes, err := os.ReadFile(filepath.Join(outputDir, "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	if !strings.Contains(string(goModBytes), "github.com/acme/minimal-api") {
+		t.Fatalf("expected module inferred from repo, got: %s", string(goModBytes))
+	}
+
+	// Regeneration should also work (overwrite defaults to true with config).
+	if err := runGenerate(nil); err != nil {
+		t.Fatalf("regeneration with config file returned error: %v", err)
+	}
+}
+
 func TestConfigFileFlagOverride(t *testing.T) {
 	specPath := filepath.Join(t.TempDir(), "openapi.json")
 	spec := `{

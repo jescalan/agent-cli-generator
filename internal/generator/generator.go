@@ -42,7 +42,12 @@ func Generate(opts Options) error {
 
 	moduleName := opts.ModuleName
 	if moduleName == "" {
-		moduleName = "generated/" + binaryName
+		repo := normalizeRepoSlug(opts.Repo)
+		if repo != "" {
+			moduleName = "github.com/" + repo
+		} else {
+			moduleName = "generated/" + binaryName
+		}
 	}
 
 	manifest, err := BuildManifest(doc, binaryName)

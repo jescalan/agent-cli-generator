@@ -101,6 +101,14 @@ func loadConfigFile() (configFile, error) {
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
 			return configFile{}, fmt.Errorf("parse %s: %w", name, err)
 		}
+		// When a config file drives generation, apply sensible defaults:
+		// output into the current directory and allow overwriting the
+		// previous generation (the generator still refuses to overwrite
+		// directories it did not create).
+		if cfg.Output == "" {
+			cfg.Output = "."
+		}
+		cfg.Overwrite = true
 		return cfg, nil
 	}
 	return configFile{}, nil
