@@ -1900,6 +1900,9 @@ func TestGenerateWritesReleaseScaffoldingAndInstallSkill(t *testing.T) {
 	if !strings.Contains(regenerate, "--spec ./openapi.json") {
 		t.Fatalf("generated regenerate workflow missing explicit checked-in spec path: %s", regenerate)
 	}
+	if !strings.Contains(regenerate, `- "openapi.json"`) {
+		t.Fatalf("generated regenerate workflow missing openapi.json trigger path: %s", regenerate)
+	}
 	if !strings.Contains(regenerate, `rsync -a --delete --exclude '.git' "$OUTPUT_DIR"/ ./`) {
 		t.Fatalf("generated regenerate workflow missing safe sync-back step: %s", regenerate)
 	}
