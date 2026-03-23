@@ -135,6 +135,7 @@ This generated project includes:
 - `scripts/install.sh` for direct binary install
 - `scripts/install-skills.sh` for installing the generated skill with the `skills` CLI
 - `.github/workflows/release.yml` for tag-driven GitHub releases
+- `.github/workflows/regenerate.yml` for automatic regeneration from the checked-in `openapi.json`
 - `skills/{{ .Skills.Name }}/SKILL.md` for agent bootstrap, workflow guidance, and operation catalog
 - `skills/{{ .Skills.Name }}/scripts/ensure-cli.sh` for binary bootstrap from the skill
 {{- if .Release.HasHomebrewTap }}

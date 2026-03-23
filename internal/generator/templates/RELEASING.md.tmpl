@@ -28,6 +28,10 @@ This generated CLI already includes release scaffolding for native binaries, che
 4. Add a `HOMEBREW_TAP_GITHUB_TOKEN` repository secret with push access to `{{ .Release.HomebrewTap }}`.
 {{- end }}
 
+## Automatic regeneration
+
+After the initial setup, `.github/workflows/regenerate.yml` handles ongoing updates automatically from the checked-in `openapi.json`. When you push spec changes to main, it regenerates the CLI in a temporary directory, syncs the result back into the repo, commits, tags a patch bump, and pushes — which triggers the release workflow. No manual tagging is needed after the first release.
+
 ## Local release
 
 ```bash

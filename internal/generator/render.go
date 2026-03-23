@@ -15,11 +15,12 @@ import (
 var templateFS embed.FS
 
 type templateData struct {
-	Manifest         Manifest
-	ModuleName       string
-	ExampleOperation string
-	Release          ReleaseConfig
-	Skills           SkillConfig
+	Manifest                Manifest
+	ModuleName              string
+	ExampleOperation        string
+	Release                 ReleaseConfig
+	Skills                  SkillConfig
+	GeneratorInstallVersion string
 }
 
 type ReleaseConfig struct {
@@ -47,16 +48,19 @@ func newTemplateData(manifest Manifest, moduleName string, opts Options) templat
 	skills := buildSkillConfig(manifest)
 
 	return templateData{
-		Manifest:         manifest,
-		ModuleName:       moduleName,
-		ExampleOperation: exampleOperation,
-		Release:          release,
-		Skills:           skills,
+		Manifest:                manifest,
+		ModuleName:              moduleName,
+		ExampleOperation:        exampleOperation,
+		Release:                 release,
+		Skills:                  skills,
+		GeneratorInstallVersion: generatorInstallVersion(),
 	}
 }
 
 func renderTemplate(targetPath, templatePath string, data any) error {
-	tmpl, err := template.ParseFS(templateFS, "templates/*.tmpl")
+	tmpl, err := template.New("").Funcs(template.FuncMap{
+		"shellQuote": shellQuote,
+	}).ParseFS(templateFS, "templates/*.tmpl")
 	if err != nil {
 		return fmt.Errorf("parse templates: %w", err)
 	}
@@ -117,6 +121,23 @@ func normalizeRepoSlug(value string) string {
 		return ""
 	}
 	return parts[0] + "/" + parts[1]
+}
+
+func generatorInstallVersion() string {
+	if generatorVersion == "" || generatorVersion == "dev" {
+		return "latest"
+	}
+	if strings.HasPrefix(generatorVersion, "v") {
+		return generatorVersion
+	}
+	return "v" + generatorVersion
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func splitRepoSlug(value string) (string, string) {
@@ -202,7 +223,7 @@ func renderSkill(manifest Manifest, release ReleaseConfig) string {
 	builder.WriteString("   go build .\n")
 	builder.WriteString("   ```\n\n")
 
-		// Usage section
+	// Usage section
 	builder.WriteString("## Usage\n\n")
 	builder.WriteString("Use this CLI in a strict, schema-first flow:\n\n")
 	builder.WriteString("1. Run `" + manifest.Name + " operations` to find the exact operation ID or alias.\n")
@@ -216,7 +237,7 @@ func renderSkill(manifest Manifest, release ReleaseConfig) string {
 	builder.WriteString("- Prefer `schema` and `example` over guessing payload shapes.\n")
 	builder.WriteString("- Treat all outputs as machine-readable JSON.\n")
 
-		// Auth section
+	// Auth section
 	builder.WriteString("\n## Auth\n\n")
 	builder.WriteString("- Use `" + manifest.Env.BaseURL + "` to override the API base URL when you want to bypass the spec's server defaults.\n")
 	for _, serverVar := range manifest.ServerVars {
@@ -244,7 +265,7 @@ func renderSkill(manifest Manifest, release ReleaseConfig) string {
 		}
 	}
 
-		// Operations section
+	// Operations section
 	tagGroups := map[string][]OperationManifest{}
 	for _, op := range manifest.Operations {
 		if len(op.Tags) == 0 {

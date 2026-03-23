@@ -1,0 +1,79 @@
+name: Regenerate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "openapi.*"
+      - "swagger.*"
+      - "agent-cli.yml"
+      - "agent-cli.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install generator
+        run: go install github.com/jescalan/agent-cli-generator@{{ shellQuote .GeneratorInstallVersion }}
+
+      - name: Regenerate
+        env:
+          OUTPUT_DIR: ${{ "{{" }} runner.temp {{ "}}" }}/generated-cli
+        run: |
+          rm -rf "$OUTPUT_DIR"
+          agent-cli-generator generate \
+            --spec ./openapi.json \
+            --output "$OUTPUT_DIR" \
+            --name {{ shellQuote .Manifest.Name }} \
+            --module {{ shellQuote .ModuleName }} \
+{{- if .Release.HasRepo }}
+            --publish {{ shellQuote .Release.Repo }} \
+{{- end }}
+{{- if .Release.HasHomebrewTap }}
+            --homebrew-tap {{ shellQuote .Release.HomebrewTap }} \
+{{- end }}
+            --overwrite
+
+          rsync -a --delete --exclude '.git' "$OUTPUT_DIR"/ ./
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit, tag, and push
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "regenerate from spec changes [skip ci]"
+
+          LATEST=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$LATEST" ]; then
+            NEXT="v0.1.0"
+          else
+            NEXT=$(echo "$LATEST" | awk -F. '{print $1"."$2"."$3+1}')
+          fi
+
+          git tag "$NEXT"
+          git push origin main --follow-tags

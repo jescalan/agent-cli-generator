@@ -123,3 +123,27 @@ func TestBuildSkillConfigReturnsName(t *testing.T) {
 		t.Fatalf("Name = %q, want %q", skills.Name, "example")
 	}
 }
+
+func TestShellQuote(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: "''"},
+		{input: "plain", want: "'plain'"},
+		{input: "owner/repo", want: "'owner/repo'"},
+		{input: "weird'quote", want: `'weird'"'"'quote'`},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.input, func(t *testing.T) {
+			t.Parallel()
+			if got := shellQuote(tc.input); got != tc.want {
+				t.Fatalf("shellQuote(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}

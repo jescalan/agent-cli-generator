@@ -1856,6 +1856,7 @@ func TestGenerateWritesReleaseScaffoldingAndInstallSkill(t *testing.T) {
 		filepath.Join(outputDir, "scripts", "install.sh"),
 		filepath.Join(outputDir, "scripts", "install-skills.sh"),
 		filepath.Join(outputDir, ".github", "workflows", "release.yml"),
+		filepath.Join(outputDir, ".github", "workflows", "regenerate.yml"),
 		filepath.Join(outputDir, "skills", "releaseapi", "SKILL.md"),
 		filepath.Join(outputDir, "skills", "releaseapi", "scripts", "ensure-cli.sh"),
 	} {
@@ -1889,6 +1890,18 @@ func TestGenerateWritesReleaseScaffoldingAndInstallSkill(t *testing.T) {
 	}
 	if !strings.Contains(goreleaser, "darwin") || !strings.Contains(goreleaser, "linux") {
 		t.Fatalf("generated goreleaser config missing target platforms: %s", goreleaser)
+	}
+
+	regenerateBytes, err := os.ReadFile(filepath.Join(outputDir, ".github", "workflows", "regenerate.yml"))
+	if err != nil {
+		t.Fatalf("read regenerate workflow: %v", err)
+	}
+	regenerate := string(regenerateBytes)
+	if !strings.Contains(regenerate, "--spec ./openapi.json") {
+		t.Fatalf("generated regenerate workflow missing explicit checked-in spec path: %s", regenerate)
+	}
+	if !strings.Contains(regenerate, `rsync -a --delete --exclude '.git' "$OUTPUT_DIR"/ ./`) {
+		t.Fatalf("generated regenerate workflow missing safe sync-back step: %s", regenerate)
 	}
 
 	skillBytes, err := os.ReadFile(filepath.Join(outputDir, "skills", "releaseapi", "SKILL.md"))

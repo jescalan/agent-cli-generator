@@ -94,6 +94,9 @@ func Generate(opts Options) error {
 	if err := renderTemplate(filepath.Join(opts.OutputDir, ".github", "workflows", "release.yml"), "templates/release.yml.tmpl", renderData); err != nil {
 		return err
 	}
+	if err := renderTemplate(filepath.Join(opts.OutputDir, ".github", "workflows", "regenerate.yml"), "templates/regenerate.yml.tmpl", renderData); err != nil {
+		return err
+	}
 
 	normalizedSpec, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

@@ -66,18 +66,12 @@ cd myapi-cli
 git init && git add -A && git commit -m "initial generation"
 git remote add origin git@github.com:acme/myapi-cli.git
 git push -u origin main
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
-Then create a tagged release:
+The first tag push triggers the included release workflow, which runs GoReleaser to produce cross-platform binaries, checksums, and a GitHub release. If you set `homebrew_tap`, it also publishes a Homebrew formula (requires a `HOMEBREW_TAP_GITHUB_TOKEN` secret with push access to the tap repo).
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The included GitHub Actions workflow runs GoReleaser on tag push, which produces cross-platform binaries, checksums, and a GitHub release. If you set `homebrew_tap`, it also publishes a Homebrew formula (requires a `HOMEBREW_TAP_GITHUB_TOKEN` secret with push access to the tap repo).
-
-To regenerate after spec changes, run `agent-cli-generator generate` again, commit, tag, and push.
+After the initial push, the included regenerate workflow handles ongoing updates from the checked-in `openapi.json`: when you commit spec changes to main, it regenerates the CLI in a temporary directory, syncs the result back into the repo, commits, tags a patch bump, and pushes — which triggers the release workflow. No manual tagging is needed after the first release.
 
 ### 4. Your users install one skill
 
