@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -17,10 +19,11 @@ type configFile struct {
 	Output      string `yaml:"output"`
 	Name        string `yaml:"name"`
 	Module      string `yaml:"module"`
+	Publish     string `yaml:"publish"`
 	Repo        string `yaml:"repo"`
 	HomebrewTap string `yaml:"homebrew_tap"`
 	Build       bool   `yaml:"build"`
-	Overwrite   bool   `yaml:"overwrite"`
+	Overwrite   *bool  `yaml:"overwrite"`
 }
 
 func main() {
@@ -60,10 +63,16 @@ func runGenerate(args []string) error {
 	outputDir := fs.String("output", cfg.Output, "Directory to write the generated CLI project into")
 	name := fs.String("name", cfg.Name, "Binary name for the generated CLI")
 	moduleName := fs.String("module", cfg.Module, "Go module name for the generated CLI")
-	repo := fs.String("repo", cfg.Repo, "GitHub repository in owner/name form for generated release/install scaffolding")
+	publishDefault := cfg.publishSlug()
+	publish := fs.String("publish", publishDefault, "GitHub repository in owner/name form where the generated CLI will be published")
+	repo := fs.String("repo", publishDefault, "Deprecated alias for --publish")
 	homebrewTap := fs.String("homebrew-tap", cfg.HomebrewTap, "GitHub tap repository in owner/name form for generated Homebrew publishing config")
 	build := fs.Bool("build", cfg.Build, "Run go build in the generated project")
-	overwrite := fs.Bool("overwrite", cfg.Overwrite, "Allow writing into an existing directory")
+	overwriteDefault := false
+	if cfg.Overwrite != nil {
+		overwriteDefault = *cfg.Overwrite
+	}
+	overwrite := fs.Bool("overwrite", overwriteDefault, "Allow writing into an existing directory")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -75,13 +84,17 @@ func runGenerate(args []string) error {
 	if *outputDir == "" {
 		return errors.New("missing required --output")
 	}
+	publishValue := strings.TrimSpace(*publish)
+	if publishValue == "" {
+		publishValue = strings.TrimSpace(*repo)
+	}
 
 	return generator.Generate(generator.Options{
 		SpecPath:    *specPath,
 		OutputDir:   *outputDir,
 		Name:        *name,
 		ModuleName:  *moduleName,
-		Repo:        *repo,
+		Publish:     publishValue,
 		HomebrewTap: *homebrewTap,
 		Build:       *build,
 		Overwrite:   *overwrite,
@@ -101,17 +114,43 @@ func loadConfigFile() (configFile, error) {
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
 			return configFile{}, fmt.Errorf("parse %s: %w", name, err)
 		}
-		// When a config file drives generation, apply sensible defaults:
-		// output into the current directory and allow overwriting the
-		// previous generation (the generator still refuses to overwrite
-		// directories it did not create).
 		if cfg.Output == "" {
-			cfg.Output = "."
+			cfg.Output = defaultConfigOutputDir(cfg)
 		}
-		cfg.Overwrite = true
+		if cfg.Overwrite == nil {
+			defaultOverwrite := true
+			cfg.Overwrite = &defaultOverwrite
+		}
 		return cfg, nil
 	}
 	return configFile{}, nil
+}
+
+func defaultConfigOutputDir(cfg configFile) string {
+	if repo := normalizeRepoSlug(cfg.publishSlug()); repo != "" {
+		if base := filepath.Base(repo); base != "." && base != "/" && base != "" {
+			return base
+		}
+	}
+	if name := strings.TrimSpace(cfg.Name); name != "" {
+		return name
+	}
+	return "generated"
+}
+
+func normalizeRepoSlug(value string) string {
+	trimmed := strings.TrimSpace(value)
+	trimmed = strings.TrimPrefix(trimmed, "https://github.com/")
+	trimmed = strings.TrimPrefix(trimmed, "http://github.com/")
+	trimmed = strings.Trim(trimmed, "/")
+	return trimmed
+}
+
+func (cfg configFile) publishSlug() string {
+	if value := strings.TrimSpace(cfg.Publish); value != "" {
+		return value
+	}
+	return strings.TrimSpace(cfg.Repo)
 }
 
 func printUsage() {
@@ -128,6 +167,7 @@ func printUsage() {
 					"--name",
 					"--module",
 					"--repo",
+					"--publish",
 					"--homebrew-tap",
 					"--build",
 					"--overwrite",

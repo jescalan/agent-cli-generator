@@ -1843,7 +1843,7 @@ func TestGenerateWritesReleaseScaffoldingAndInstallSkill(t *testing.T) {
 		OutputDir:   outputDir,
 		Name:        "releaseapi",
 		ModuleName:  "github.com/acme/releaseapi",
-		Repo:        "acme/releaseapi",
+		Publish:     "acme/releaseapi",
 		HomebrewTap: "acme/homebrew-tap",
 		Build:       true,
 	}); err != nil {

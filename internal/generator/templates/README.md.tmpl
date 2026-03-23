@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/{{ .Release.Repo }}/main/scripts/in
 ```
 {{- else }}
 
-This generated project includes `skills/` and `scripts/install-skills.sh`, but the install path is turnkey only after the project is published in a GitHub repository. Regenerate with `--repo owner/name`, or set `REPO_URL=https://github.com/owner/name` when using `scripts/install-skills.sh`.
+This generated project includes `skills/` and `scripts/install-skills.sh`, but the install path is turnkey only after the project is published in a GitHub repository. Regenerate with `--publish owner/name`, or set `REPO_URL=https://github.com/owner/name` when using `scripts/install-skills.sh`.
 {{- end }}
 
 ## Install
@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/{{ .Release.Repo }}/main/scripts/in
 ```
 {{- else }}
 
-This generated project includes release scaffolding for native binaries and an install script, but the install command is only turnkey after you publish the project in a GitHub repository. Regenerate with `--repo owner/name`, or set `REPO=owner/name` when using `scripts/install.sh`.
+This generated project includes release scaffolding for native binaries and an install script, but the install command is only turnkey after you publish the project in a GitHub repository. Regenerate with `--publish owner/name`, or set `REPO=owner/name` when using `scripts/install.sh`.
 {{- end }}
 {{- if .Release.HasHomebrewTap }}
 

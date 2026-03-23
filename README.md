@@ -25,10 +25,11 @@ go build .                                       # source
 ```yaml
 # agent-cli.yml
 spec: ./openapi.yaml
-repo: acme/myapi-cli
+publish: acme/myapi-cli
+# repo: acme/myapi-cli           # legacy alias, still supported
 ```
 
-That's the minimum. The generator infers `name` from the spec title, `module` from the repo, and defaults `output` to `.` with `overwrite` enabled.
+That's the minimum. The generator infers `name` from the spec title, `module` from the publish repo, and defaults `output` to `./<repo-name>`. It also defaults `overwrite` to `true`, which makes regeneration easy while still refusing to overwrite directories it did not create.
 
 Optional fields:
 
@@ -38,6 +39,7 @@ module: github.com/acme/myapi-cli  # override the Go module path
 output: ./out                      # generate into a different directory
 homebrew_tap: acme/homebrew-tap    # enable Homebrew publishing
 build: true                        # produce a native binary
+overwrite: false                   # disable regeneration into the same output dir
 ```
 
 ### 2. Generate
@@ -52,7 +54,7 @@ Or skip the config file and pass flags directly:
 agent-cli-generator generate \
   --spec ./openapi.yaml \
   --output ./out/myapi-cli \
-  --repo acme/myapi-cli \
+  --publish acme/myapi-cli \
   --build
 ```
 
@@ -96,10 +98,11 @@ Auth is environment-driven. OAuth2 `client_credentials` flows get native token a
 | Flag | Description |
 |------|-------------|
 | `--spec` | Path or URL to an OpenAPI 3.0/3.1 or Swagger 2.0 spec |
-| `--output` | Output directory (default `.` with config file) |
+| `--output` | Output directory (default `./<repo-name>` when `publish` is set, otherwise `./generated`) |
 | `--name` | Binary name (default: derived from spec title) |
-| `--module` | Go module path (default: inferred from `--repo`) |
-| `--repo` | GitHub `owner/name` for release scaffolding |
+| `--module` | Go module path (default: inferred from `--publish`) |
+| `--publish` | GitHub `owner/name` where the generated CLI will be published |
+| `--repo` | Deprecated alias for `--publish` |
 | `--homebrew-tap` | Homebrew tap `owner/name` for formula publishing |
 | `--build` | Run `go build` after generation |
 | `--overwrite` | Allow writing into an existing directory (default `true` with config file) |

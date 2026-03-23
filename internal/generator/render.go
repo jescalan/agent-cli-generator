@@ -43,7 +43,7 @@ func newTemplateData(manifest Manifest, moduleName string, opts Options) templat
 		exampleOperation = manifest.Operations[0].ID
 	}
 
-	release := buildReleaseConfig(moduleName, opts.Repo, opts.HomebrewTap)
+	release := buildReleaseConfig(moduleName, opts.Publish, opts.HomebrewTap)
 	skills := buildSkillConfig(manifest)
 
 	return templateData{
@@ -302,7 +302,7 @@ func renderBootstrapScript(manifest Manifest, release ReleaseConfig) string {
 		builder.WriteString("exit 0\n")
 	} else {
 		builder.WriteString("echo \"" + manifest.Name + " is not on PATH and this project has not been published with a configured repo yet.\" >&2\n")
-		builder.WriteString("echo \"Install it manually or publish the generated project with --repo owner/name.\" >&2\n")
+		builder.WriteString("echo \"Install it manually or publish the generated project with --publish owner/name.\" >&2\n")
 		builder.WriteString("exit 1\n")
 	}
 	return builder.String()

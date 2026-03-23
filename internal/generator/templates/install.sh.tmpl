@@ -6,7 +6,7 @@ REPO="${REPO:-{{ .Release.Repo }}}"
 VERSION="${VERSION:-}"
 
 if [ -z "$REPO" ]; then
-  echo "REPO is not configured. Regenerate this project with --repo owner/name or set REPO=owner/name before running this installer." >&2
+  echo "REPO is not configured. Regenerate this project with --publish owner/name or set REPO=owner/name before running this installer." >&2
   exit 1
 fi
 

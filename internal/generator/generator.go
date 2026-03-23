@@ -23,7 +23,7 @@ type Options struct {
 	OutputDir   string
 	Name        string
 	ModuleName  string
-	Repo        string
+	Publish     string
 	HomebrewTap string
 	Build       bool
 	Overwrite   bool
@@ -42,7 +42,7 @@ func Generate(opts Options) error {
 
 	moduleName := opts.ModuleName
 	if moduleName == "" {
-		repo := normalizeRepoSlug(opts.Repo)
+		repo := normalizeRepoSlug(opts.Publish)
 		if repo != "" {
 			moduleName = "github.com/" + repo
 		} else {

@@ -5,7 +5,7 @@ REPO_URL="${REPO_URL:-{{- if .Release.HasRepo -}}https://github.com/{{ .Release.
 SKILL_NAME="{{ .Skills.Name }}"
 
 if [ -z "$REPO_URL" ]; then
-  echo "REPO_URL is not configured. Regenerate this project with --repo owner/name or set REPO_URL=https://github.com/owner/name before running this installer." >&2
+  echo "REPO_URL is not configured. Regenerate this project with --publish owner/name or set REPO_URL=https://github.com/owner/name before running this installer." >&2
   exit 1
 fi
 

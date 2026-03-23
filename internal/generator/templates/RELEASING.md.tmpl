@@ -20,7 +20,7 @@ This generated CLI already includes release scaffolding for native binaries, che
 {{- if .Release.HasRepo }}
    Expected repository: `{{ .Release.Repo }}`.
 {{- else }}
-   If you want the install script to work without extra env vars, regenerate with `--repo owner/name` or set `REPO=owner/name` when running `scripts/install.sh`.
+   If you want the install script to work without extra env vars, regenerate with `--publish owner/name` or set `REPO=owner/name` when running `scripts/install.sh`.
 {{- end }}
 2. Create a tag like `v0.1.0` and push it.
 3. GitHub Actions runs `.github/workflows/release.yml`.
