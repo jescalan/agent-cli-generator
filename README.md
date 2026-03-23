@@ -59,7 +59,25 @@ agent-cli-generator generate \
 
 ### 3. Publish
 
-Push the generated project to GitHub and tag a release. The included `.goreleaser.yaml` and GitHub Actions workflow handle cross-platform binaries, checksums, and optionally Homebrew.
+The generated project is a standalone Git repo. Push it to the GitHub repository you specified in `publish`:
+
+```bash
+cd myapi-cli
+git init && git add -A && git commit -m "initial generation"
+git remote add origin git@github.com:acme/myapi-cli.git
+git push -u origin main
+```
+
+Then create a tagged release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The included GitHub Actions workflow runs GoReleaser on tag push, which produces cross-platform binaries, checksums, and a GitHub release. If you set `homebrew_tap`, it also publishes a Homebrew formula (requires a `HOMEBREW_TAP_GITHUB_TOKEN` secret with push access to the tap repo).
+
+To regenerate after spec changes, run `agent-cli-generator generate` again, commit, tag, and push.
 
 ### 4. Your users install one skill
 
