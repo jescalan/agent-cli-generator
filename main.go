@@ -20,7 +20,6 @@ type configFile struct {
 	Name        string `yaml:"name"`
 	Module      string `yaml:"module"`
 	Publish     string `yaml:"publish"`
-	Repo        string `yaml:"repo"`
 	HomebrewTap string `yaml:"homebrew_tap"`
 	Build       bool   `yaml:"build"`
 	Overwrite   *bool  `yaml:"overwrite"`
@@ -147,10 +146,7 @@ func normalizeRepoSlug(value string) string {
 }
 
 func (cfg configFile) publishSlug() string {
-	if value := strings.TrimSpace(cfg.Publish); value != "" {
-		return value
-	}
-	return strings.TrimSpace(cfg.Repo)
+	return strings.TrimSpace(cfg.Publish)
 }
 
 func printUsage() {

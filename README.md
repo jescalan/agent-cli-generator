@@ -26,7 +26,6 @@ go build .                                       # source
 # agent-cli.yml
 spec: ./openapi.yaml
 publish: acme/myapi-cli
-# repo: acme/myapi-cli           # legacy alias, still supported
 ```
 
 That's the minimum. The generator infers `name` from the spec title, `module` from the publish repo, and defaults `output` to `./<repo-name>`. It also defaults `overwrite` to `true`, which makes regeneration easy while still refusing to overwrite directories it did not create.

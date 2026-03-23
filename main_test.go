@@ -179,50 +179,6 @@ func TestMinimalConfigFileSpecAndRepo(t *testing.T) {
 	}
 }
 
-func TestConfigFileLegacyRepoKeyStillWorks(t *testing.T) {
-	specPath := filepath.Join(t.TempDir(), "openapi.json")
-	spec := `{
-	  "openapi": "3.0.3",
-	  "info": { "title": "Legacy Repo API", "version": "1.0.0" },
-	  "paths": {
-	    "/ping": {
-	      "get": {
-	        "operationId": "ping.get",
-	        "responses": { "200": { "description": "ok" } }
-	      }
-	    }
-	  }
-	}`
-	if err := os.WriteFile(specPath, []byte(spec), 0o644); err != nil {
-		t.Fatalf("write spec: %v", err)
-	}
-
-	configDir := t.TempDir()
-	configContent := "spec: " + specPath + "\nrepo: acme/legacy-repo-api\n"
-	if err := os.WriteFile(filepath.Join(configDir, "agent-cli.yml"), []byte(configContent), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(configDir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer os.Chdir(origDir)
-
-	if err := runGenerate(nil); err != nil {
-		t.Fatalf("runGenerate with legacy repo config returned error: %v", err)
-	}
-
-	outputDir := filepath.Join(configDir, "legacy-repo-api")
-	goModBytes, err := os.ReadFile(filepath.Join(outputDir, "go.mod"))
-	if err != nil {
-		t.Fatalf("read go.mod: %v", err)
-	}
-	if !strings.Contains(string(goModBytes), "github.com/acme/legacy-repo-api") {
-		t.Fatalf("expected module inferred from legacy repo key, got: %s", string(goModBytes))
-	}
-}
-
 func TestConfigFileRespectsExplicitOverwriteFalse(t *testing.T) {
 	specPath := filepath.Join(t.TempDir(), "openapi.json")
 	spec := `{
