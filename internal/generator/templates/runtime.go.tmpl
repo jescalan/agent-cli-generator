@@ -2095,6 +2095,11 @@ func joinBaseURL(base, path string, query url.Values) (string, error) {
 		}
 	}
 
+	if path == "" || path == "/" {
+		baseURL.RawQuery = query.Encode()
+		return baseURL.String(), nil
+	}
+
 	resolvedPath := strings.TrimRight(baseURL.Path, "/") + path
 	baseURL.Path = resolvedPath
 	baseURL.RawQuery = query.Encode()

@@ -202,6 +202,97 @@ func TestGenerateExpandsServerVariableDefaults(t *testing.T) {
 	}
 }
 
+func TestGeneratePreservesExplicitBaseURLForRootOperations(t *testing.T) {
+	t.Parallel()
+
+	specPath := filepath.Join(t.TempDir(), "openapi.json")
+	spec := `{
+	  "openapi": "3.0.3",
+	  "info": { "title": "Root API", "version": "1.0.0" },
+	  "servers": [{ "url": "/api" }],
+	  "paths": {
+	    "/": {
+	      "get": {
+	        "operationId": "system.info",
+	        "responses": {
+	          "200": {
+	            "description": "ok",
+	            "content": {
+	              "application/json": {
+	                "schema": {
+	                  "type": "object",
+	                  "properties": {
+	                    "ok": { "type": "boolean" }
+	                  },
+	                  "required": ["ok"]
+	                }
+	              }
+	            }
+	          }
+	        }
+	      }
+	    },
+	    "/health": {
+	      "get": {
+	        "operationId": "health.get",
+	        "responses": {
+	          "200": {
+	            "description": "ok"
+	          }
+	        }
+	      }
+	    }
+	  }
+	}`
+	if err := os.WriteFile(specPath, []byte(spec), 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "out")
+	if err := Generate(Options{
+		SpecPath:  specPath,
+		OutputDir: outputDir,
+		Name:      "rootapi",
+		Build:     true,
+	}); err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	binary := filepath.Join(outputDir, "bin", "rootapi")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/api/":
+			http.NotFound(w, r)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	stdout, stderr, err := runCLI(t, outputDir, nil, binary, "api", "system.info", "--base-url", server.URL+"/api", "--dry-run")
+	if err != nil {
+		t.Fatalf("dry-run failed: %v\nstderr=%s", err, stderr)
+	}
+	if !strings.Contains(stdout, `"url": "`+server.URL+`/api"`) {
+		t.Fatalf("expected root operation to preserve explicit base URL, got: %s", stdout)
+	}
+	if strings.Contains(stdout, `"url": "`+server.URL+`/api/"`) {
+		t.Fatalf("expected root operation to avoid appending trailing slash, got: %s", stdout)
+	}
+
+	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "api", "system.info", "--base-url", server.URL+"/api")
+	if err != nil {
+		t.Fatalf("root operation failed: %v\nstderr=%s", err, stderr)
+	}
+	if !strings.Contains(stdout, `"ok": true`) {
+		t.Fatalf("expected root operation response body, got: %s", stdout)
+	}
+}
+
 func TestGenerateUsesOAuthClientCredentialsFromSpec(t *testing.T) {
 	t.Parallel()
 
