@@ -64,9 +64,12 @@ go build .
 - `{{ .Manifest.Name }} operations`
 - `{{ .Manifest.Name }} schema <operation-id-or-alias>`
 - `{{ .Manifest.Name }} example <operation-id-or-alias> --kind body|params|response`
-- `{{ .Manifest.Name }} call <operation-id-or-alias> --params '{...}' --body '{...}'`
+- `{{ .Manifest.Name }} api <operation-id-or-alias> --params '{...}' --body '{...}'`
+{{- if .Manifest.WhoAmIOperationID }}
+- `{{ .Manifest.Name }} whoami`
+{{- end }}
 - `{{ .Manifest.Name }} auth`
-- `{{ .Manifest.Name }} spec`
+- `{{ .Manifest.Name }} openapi`
 
 ## Environment
 
@@ -96,7 +99,7 @@ Header example:
 
 ```bash
 export {{ .Manifest.Env.HeadersJSON }}='{"Clerk-API-Version":"2025-11-10"}'
-{{ .Manifest.Name }} call {{ .ExampleOperation }}
+{{ .Manifest.Name }} api {{ .ExampleOperation }}
 ```
 
 Auth override example:
@@ -104,14 +107,14 @@ Auth override example:
 ```bash
 export API_TOKEN=...
 export {{ .Manifest.Env.OverridesJSON }}='{"auth":{"headers":[{"name":"Authorization","env":"API_TOKEN","prefix":"Bearer ","required":true,"secret":true}]}}'
-{{ .Manifest.Name }} call {{ .ExampleOperation }}
+{{ .Manifest.Name }} api {{ .ExampleOperation }}
 ```
 
 Conditional requirement example:
 
 ```bash
 export {{ .Manifest.Env.OverridesJSON }}='{"operations":{"{{ .ExampleOperation }}":{"requirements":[{"when":[{"location":"query","name":"state","oneOf":["stopped","destroyed"]}],"require":[{"location":"query","name":"instance_id"}],"message":"query.instance_id is required when query.state is stopped or destroyed"}]}}}'
-{{ .Manifest.Name }} call {{ .ExampleOperation }} --params '{"query":{"state":"stopped","instance_id":"..."}}'
+{{ .Manifest.Name }} api {{ .ExampleOperation }} --params '{"query":{"state":"stopped","instance_id":"..."}}'
 ```
 
 ## Example
@@ -119,7 +122,7 @@ export {{ .Manifest.Env.OverridesJSON }}='{"operations":{"{{ .ExampleOperation }
 ```bash
 {{ .Manifest.Name }} schema {{ .ExampleOperation }}
 {{ .Manifest.Name }} example {{ .ExampleOperation }} --kind params
-{{ .Manifest.Name }} call {{ .ExampleOperation }} --params '{"query":{}}' --dry-run
+{{ .Manifest.Name }} api {{ .ExampleOperation }} --params '{"query":{}}' --dry-run
 ```
 
 ## Notes

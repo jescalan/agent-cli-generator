@@ -229,8 +229,12 @@ func renderSkill(manifest Manifest, release ReleaseConfig) string {
 	builder.WriteString("1. Run `" + manifest.Name + " operations` to find the exact operation ID or alias.\n")
 	builder.WriteString("2. Run `" + manifest.Name + " schema <operation-id-or-alias>` to inspect inputs, outputs, and auth.\n")
 	builder.WriteString("3. Run `" + manifest.Name + " example <operation-id-or-alias> --kind body|params|response` to get a concrete payload shape.\n")
-	builder.WriteString("4. Run `" + manifest.Name + " call <operation-id-or-alias> --dry-run` before any mutating request.\n")
-	builder.WriteString("5. Run `" + manifest.Name + " call <operation-id-or-alias>` without `--dry-run` only after the request is valid.\n\n")
+	builder.WriteString("4. Run `" + manifest.Name + " api <operation-id-or-alias> --dry-run` before any mutating request.\n")
+	builder.WriteString("5. Run `" + manifest.Name + " api <operation-id-or-alias>` without `--dry-run` only after the request is valid.\n")
+	if manifest.WhoAmIOperationID != "" {
+		builder.WriteString("6. Run `" + manifest.Name + " whoami` when you need to debug which identity the current auth resolves to.\n")
+	}
+	builder.WriteString("\n")
 	builder.WriteString("### Rules\n\n")
 	builder.WriteString("- Always send request inputs as JSON strings via `--params` and `--body`.\n")
 	builder.WriteString("- Prefer location-aware params: `{\"path\": {...}, \"query\": {...}, \"header\": {...}, \"cookie\": {...}}`.\n")

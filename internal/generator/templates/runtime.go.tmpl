@@ -80,6 +80,7 @@ type Manifest struct {
 	EnvPrefix      string              `json:"envPrefix"`
 	Env            EnvConfig           `json:"env"`
 	Auth           []AuthScheme        `json:"auth"`
+	WhoAmIOperationID string           `json:"whoamiOperationId,omitempty"`
 	Operations     []OperationManifest `json:"operations"`
 }
 
@@ -241,12 +242,14 @@ func run(args []string) error {
 		return cmdSchema(args[1:])
 	case "example":
 		return cmdExample(args[1:])
-	case "call":
-		return cmdCall(args[1:])
+	case "api":
+		return cmdAPI(args[1:])
+	case "whoami":
+		return cmdWhoAmI(args[1:])
 	case "auth":
 		return cmdAuth()
-	case "spec":
-		return cmdSpec()
+	case "openapi":
+		return cmdOpenAPI()
 	default:
 		return &cliError{
 			Code:     "unknown_command",
@@ -281,15 +284,21 @@ func cmdHelp() error {
 				"description": "Synthesize example JSON from the embedded schemas.",
 			},
 			{
-				"name":        "call <operation-id-or-alias> --params '{...}' --body '{...}'",
+				"name":        "api <operation-id-or-alias> --params '{...}' --body '{...}'",
 				"description": "Validate and execute an API request.",
 			},
+			{{- if .Manifest.WhoAmIOperationID }}
+			{
+				"name":        "whoami",
+				"description": "Call the detected self-identity endpoint for auth debugging.",
+			},
+			{{- end }}
 			{
 				"name":        "auth",
 				"description": "Show auth schemes and expected environment variables.",
 			},
 			{
-				"name":        "spec",
+				"name":        "openapi",
 				"description": "Print the embedded OpenAPI document.",
 			},
 		},
@@ -302,6 +311,7 @@ func cmdHelp() error {
 		"_meta": map[string]any{
 			"generatedAt":    manifest.GeneratedAt,
 			"operationCount": len(manifest.Operations),
+			"discoveryCommand": "operations",
 		},
 	})
 }
@@ -519,7 +529,7 @@ func clientCredentialsStatus(scheme AuthScheme) map[string]any {
 	}
 }
 
-func cmdSpec() error {
+func cmdOpenAPI() error {
 	data, err := embeddedFiles.ReadFile("openapi.json")
 	if err != nil {
 		return &cliError{
@@ -533,16 +543,34 @@ func cmdSpec() error {
 	return nil
 }
 
-func cmdCall(args []string) error {
+func cmdAPI(args []string) error {
 	if len(args) == 0 {
 		return &cliError{
 			Code:     "missing_operation",
-			Message:  "call requires an operation ID or alias",
+			Message:  "api requires an operation ID or alias",
 			ExitCode: 2,
 		}
 	}
+	return executeOperationCommand(args[0], args[1:])
+}
 
-	fs := newFlagSet("call")
+func cmdWhoAmI(args []string) error {
+	manifest, err := loadManifest()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(manifest.WhoAmIOperationID) == "" {
+		return &cliError{
+			Code:     "whoami_unsupported",
+			Message:  "this CLI does not expose a detected whoami endpoint",
+			ExitCode: 2,
+		}
+	}
+	return executeOperationCommand(manifest.WhoAmIOperationID, args)
+}
+
+func executeOperationCommand(operationID string, args []string) error {
+	fs := newFlagSet("api")
 	baseURL := fs.String("base-url", "", "")
 	paramsText := fs.String("params", "{}", "")
 	bodyText := fs.String("body", "", "")
@@ -553,11 +581,11 @@ func cmdCall(args []string) error {
 	pageLimit := fs.Int("page-limit", 50, "")
 	pageDelayMS := fs.Int("page-delay-ms", 0, "")
 	timeout := fs.Duration("timeout", 30*time.Second, "")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return flagError(err)
 	}
 
-	manifest, pathItem, operation, err := resolveOperation(args[0])
+	manifest, pathItem, operation, err := resolveOperation(operationID)
 	if err != nil {
 		return err
 	}

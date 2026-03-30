@@ -9,19 +9,20 @@ import (
 )
 
 type Manifest struct {
-	Name           string               `json:"name"`
-	Title          string               `json:"title"`
-	Version        string               `json:"version"`
-	Description    string               `json:"description,omitempty"`
-	ServerTemplate string               `json:"serverTemplate,omitempty"`
-	DefaultServer  string               `json:"defaultServer,omitempty"`
-	RelativeServer bool                 `json:"relativeServer"`
-	ServerVars     []ServerVariable     `json:"serverVariables,omitempty"`
-	GeneratedAt    string               `json:"generatedAt,omitempty"`
-	EnvPrefix      string               `json:"envPrefix"`
-	Env            EnvConfig            `json:"env"`
-	Auth           []AuthSchemeManifest `json:"auth"`
-	Operations     []OperationManifest  `json:"operations"`
+	Name              string               `json:"name"`
+	Title             string               `json:"title"`
+	Version           string               `json:"version"`
+	Description       string               `json:"description,omitempty"`
+	ServerTemplate    string               `json:"serverTemplate,omitempty"`
+	DefaultServer     string               `json:"defaultServer,omitempty"`
+	RelativeServer    bool                 `json:"relativeServer"`
+	ServerVars        []ServerVariable     `json:"serverVariables,omitempty"`
+	GeneratedAt       string               `json:"generatedAt,omitempty"`
+	EnvPrefix         string               `json:"envPrefix"`
+	Env               EnvConfig            `json:"env"`
+	Auth              []AuthSchemeManifest `json:"auth"`
+	WhoAmIOperationID string               `json:"whoamiOperationId,omitempty"`
+	Operations        []OperationManifest  `json:"operations"`
 }
 
 type EnvConfig struct {
@@ -226,8 +227,81 @@ func BuildManifest(doc *openapi3.T, binaryName string) (Manifest, error) {
 	sort.Slice(manifest.Operations, func(i, j int) bool {
 		return manifest.Operations[i].ID < manifest.Operations[j].ID
 	})
+	manifest.WhoAmIOperationID = detectWhoAmIOperation(manifest.Operations)
 
 	return manifest, nil
+}
+
+func detectWhoAmIOperation(operations []OperationManifest) string {
+	bestID := ""
+	bestScore := 0
+	for _, op := range operations {
+		score := whoAmIScore(op)
+		if score > bestScore {
+			bestScore = score
+			bestID = op.ID
+		}
+	}
+	return bestID
+}
+
+func whoAmIScore(op OperationManifest) int {
+	path := strings.ToLower(strings.TrimSpace(op.Path))
+	id := strings.ToLower(strings.TrimSpace(op.ID))
+	summary := strings.ToLower(strings.TrimSpace(op.Summary))
+	description := strings.ToLower(strings.TrimSpace(op.Description))
+
+	score := 0
+	if strings.EqualFold(op.Method, "GET") {
+		score += 100
+	}
+	if !strings.Contains(path, "{") {
+		score += 25
+	}
+
+	for _, segment := range pathSegments(path) {
+		switch segment {
+		case "whoami":
+			score += 1000
+		case "me", "self":
+			score += 800
+		}
+	}
+
+	if strings.Contains(id, "whoami") {
+		score += 900
+	}
+	if strings.Contains(summary, "current user") || strings.Contains(description, "current user") {
+		score += 400
+	}
+	if strings.Contains(summary, "authenticated user") || strings.Contains(description, "authenticated user") {
+		score += 400
+	}
+	if strings.Contains(path, "/me") || strings.Contains(path, "/self") {
+		score += 150
+	}
+
+	if score < 500 {
+		return 0
+	}
+	return score
+}
+
+func pathSegments(path string) []string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return nil
+	}
+	raw := strings.Split(trimmed, "/")
+	out := make([]string, 0, len(raw))
+	for _, segment := range raw {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			continue
+		}
+		out = append(out, segment)
+	}
+	return out
 }
 
 func qualifyOperationIDWithMethod(id, method string) string {

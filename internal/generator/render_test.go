@@ -61,8 +61,9 @@ func TestRenderSkillContainsAllSections(t *testing.T) {
 	t.Parallel()
 
 	manifest := Manifest{
-		Name:  "example",
-		Title: "Example API",
+		Name:              "example",
+		Title:             "Example API",
+		WhoAmIOperationID: "whoami.get",
 		Env: EnvConfig{
 			BaseURL:       "EXAMPLE_BASE_URL",
 			HeadersJSON:   "EXAMPLE_HEADERS_JSON",
@@ -92,6 +93,7 @@ func TestRenderSkillContainsAllSections(t *testing.T) {
 		"brew install acme/homebrew-tap/example",
 		"## Usage",
 		"schema-first flow",
+		"`example whoami`",
 		"## Auth",
 		"EXAMPLE_BASE_URL",
 		"## Operations",

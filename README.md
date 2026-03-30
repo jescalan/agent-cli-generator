@@ -87,15 +87,21 @@ Usable today for JSON-first APIs. Exercised against real specs from Clerk, Tails
 
 ## How it works
 
-The generated CLI exposes six commands:
+The generated CLI exposes six core commands:
 
 ```
 operations                                       # list all operations
 schema <id>                                      # inspect inputs, outputs, auth
 example <id> --kind body|params|response         # concrete payload shape
-call <id> --params '{...}' --body '{...}'        # make a request
+api <id> --params '{...}' --body '{...}'         # make a request
 auth                                             # show required env vars
-spec                                             # dump the embedded OpenAPI doc
+openapi                                          # dump the embedded OpenAPI doc
+```
+
+When the source API exposes an obvious self-identity endpoint like `/whoami` or `/me`, the generated CLI also adds:
+
+```text
+whoami                                           # call the detected identity endpoint
 ```
 
 Params use location-aware JSON: `{"path": {}, "query": {}, "header": {}, "cookie": {}}`. Flat params work when a name is unambiguous.
@@ -123,7 +129,7 @@ Auth is environment-driven. OAuth2 `client_credentials` flows get native token a
 Use `*_HEADERS_JSON` for undeclared headers (e.g. version pinning):
 
 ```bash
-CLERK_HEADERS_JSON='{"Clerk-API-Version":"2025-11-10"}' clerk call GetUsersCount
+CLERK_HEADERS_JSON='{"Clerk-API-Version":"2025-11-10"}' clerk api GetUsersCount
 ```
 
 Use `*_OVERRIDES_JSON` when the spec is missing auth or has conditional input rules:
@@ -131,7 +137,7 @@ Use `*_OVERRIDES_JSON` when the spec is missing auth or has conditional input ru
 ```bash
 export FLY_API_TOKEN=...
 export FLYMACHINES_OVERRIDES_JSON='{"auth":{"headers":[{"name":"Authorization","env":"FLY_API_TOKEN","prefix":"Bearer ","required":true,"secret":true}]}}'
-flymachines call apps.list --params '{"query":{"org_slug":"personal"}}'
+flymachines api apps.list --params '{"query":{"org_slug":"personal"}}'
 ```
 
 The override layer also supports per-operation requirements for conditional params.

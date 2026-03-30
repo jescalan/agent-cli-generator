@@ -925,6 +925,54 @@ func TestBuildManifestAddsDerivedAliasesForNamedOperations(t *testing.T) {
 	}
 }
 
+func TestBuildManifestDetectsWhoAmIOperation(t *testing.T) {
+	t.Parallel()
+
+	spec := []byte(`{
+	  "openapi": "3.0.3",
+	  "info": { "title": "Identity API", "version": "1.0.0" },
+	  "paths": {
+	    "/users": {
+	      "get": {
+	        "operationId": "users.list",
+	        "responses": { "200": { "description": "ok" } }
+	      }
+	    },
+	    "/me": {
+	      "get": {
+	        "operationId": "users.me",
+	        "summary": "Get current user",
+	        "responses": { "200": { "description": "ok" } }
+	      }
+	    },
+	    "/whoami": {
+	      "post": {
+	        "operationId": "whoami.post",
+	        "responses": { "200": { "description": "ok" } }
+	      }
+	    }
+	  }
+	}`)
+
+	loader := openapi3.NewLoader()
+	doc, err := loader.LoadFromData(spec)
+	if err != nil {
+		t.Fatalf("failed to parse test spec: %v", err)
+	}
+	if err := doc.Validate(context.Background()); err != nil {
+		t.Fatalf("test spec validation failed: %v", err)
+	}
+
+	manifest, err := BuildManifest(doc, "identity")
+	if err != nil {
+		t.Fatalf("BuildManifest returned error: %v", err)
+	}
+
+	if manifest.WhoAmIOperationID != "whoami.post" {
+		t.Fatalf("expected whoami.post to be selected, got %q", manifest.WhoAmIOperationID)
+	}
+}
+
 func TestBuildManifestSkipsConflictingAliases(t *testing.T) {
 	t.Parallel()
 

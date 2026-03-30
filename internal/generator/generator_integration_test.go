@@ -87,6 +87,14 @@ func TestGenerateProducesRunnableCLI(t *testing.T) {
 		t.Fatalf("operations output did not include widgets.get: %s", stdout)
 	}
 
+	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "openapi")
+	if err != nil {
+		t.Fatalf("openapi failed: %v\nstderr=%s", err, stderr)
+	}
+	if !strings.Contains(stdout, `"openapi": "3.0.3"`) {
+		t.Fatalf("openapi output did not include document version: %s", stdout)
+	}
+
 	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "example", "widgets.get", "--kind", "params")
 	if err != nil {
 		t.Fatalf("example failed: %v\nstderr=%s", err, stderr)
@@ -95,7 +103,7 @@ func TestGenerateProducesRunnableCLI(t *testing.T) {
 		t.Fatalf("example output did not include grouped params: %s", stdout)
 	}
 
-	_, stderr, err = runCLI(t, outputDir, nil, binary, "call", "widgets.get", "--base-url", "https://example.com", "--params", `{"id":"123"}`, "--dry-run")
+	_, stderr, err = runCLI(t, outputDir, nil, binary, "api", "widgets.get", "--base-url", "https://example.com", "--params", `{"id":"123"}`, "--dry-run")
 	if err == nil {
 		t.Fatalf("expected ambiguous flat parameter input to fail")
 	}
@@ -103,7 +111,7 @@ func TestGenerateProducesRunnableCLI(t *testing.T) {
 		t.Fatalf("expected ambiguous_parameter error, got: %s", stderr)
 	}
 
-	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "call", "widgets.get", "--base-url", "https://example.com", "--params", `{"path":{"id":"123"},"query":{"id":"external"}}`, "--dry-run")
+	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "api", "widgets.get", "--base-url", "https://example.com", "--params", `{"path":{"id":"123"},"query":{"id":"external"}}`, "--dry-run")
 	if err != nil {
 		t.Fatalf("dry-run failed: %v\nstderr=%s", err, stderr)
 	}
@@ -111,7 +119,7 @@ func TestGenerateProducesRunnableCLI(t *testing.T) {
 		t.Fatalf("dry-run URL was wrong: %s", stdout)
 	}
 
-	_, stderr, err = runCLI(t, outputDir, nil, binary, "call", "widgets.get", "--base-url", "https://example.com", "--params", `{"path":{"id":"123"},"query":{"id":"external"}}`)
+	_, stderr, err = runCLI(t, outputDir, nil, binary, "api", "widgets.get", "--base-url", "https://example.com", "--params", `{"path":{"id":"123"},"query":{"id":"external"}}`)
 	if err == nil {
 		t.Fatalf("expected missing auth to fail before network")
 	}
@@ -134,9 +142,9 @@ func TestGenerateProducesRunnableCLI(t *testing.T) {
 	}))
 	defer server.Close()
 
-	stdout, stderr, err = runCLI(t, outputDir, []string{"WIDGETS_API_KEY=secret-token"}, binary, "call", "widgets.get", "--base-url", server.URL, "--params", `{"path":{"id":"123"},"query":{"id":"external"}}`)
+	stdout, stderr, err = runCLI(t, outputDir, []string{"WIDGETS_API_KEY=secret-token"}, binary, "api", "widgets.get", "--base-url", server.URL, "--params", `{"path":{"id":"123"},"query":{"id":"external"}}`)
 	if err != nil {
-		t.Fatalf("authenticated call failed: %v\nstderr=%s", err, stderr)
+		t.Fatalf("authenticated api failed: %v\nstderr=%s", err, stderr)
 	}
 	if !strings.Contains(stdout, `"ok": true`) {
 		t.Fatalf("expected response body in output, got: %s", stdout)
@@ -185,7 +193,7 @@ func TestGenerateExpandsServerVariableDefaults(t *testing.T) {
 	}
 
 	binary := filepath.Join(outputDir, "bin", "templated")
-	stdout, stderr, err := runCLI(t, outputDir, nil, binary, "call", "ping.get", "--dry-run")
+	stdout, stderr, err := runCLI(t, outputDir, nil, binary, "api", "ping.get", "--dry-run")
 	if err != nil {
 		t.Fatalf("dry-run failed: %v\nstderr=%s", err, stderr)
 	}
@@ -296,9 +304,9 @@ func TestGenerateUsesOAuthClientCredentialsFromSpec(t *testing.T) {
 	stdout, stderr, err := runCLI(t, outputDir, []string{
 		"OAUTHAPI_CLIENT_ID=client-id",
 		"OAUTHAPI_CLIENT_SECRET=client-secret",
-	}, binary, "call", "items.list")
+	}, binary, "api", "items.list")
 	if err != nil {
-		t.Fatalf("call failed: %v\nstderr=%s", err, stderr)
+		t.Fatalf("api failed: %v\nstderr=%s", err, stderr)
 	}
 	if tokenHits != 1 || apiHits != 1 {
 		t.Fatalf("expected one token request and one API request, got tokenHits=%d apiHits=%d", tokenHits, apiHits)
@@ -376,7 +384,7 @@ func TestGeneratePreflightsMissingScopesFromBearerClientCredentials(t *testing.T
 		"BEARERAPI_TOKEN_URL=" + server.URL + "/oauth/token",
 		"BEARERAPI_CLIENT_ID=client-id",
 		"BEARERAPI_CLIENT_SECRET=client-secret",
-	}, binary, "call", "items.list")
+	}, binary, "api", "items.list")
 	if err == nil {
 		t.Fatalf("expected missing_scope failure")
 	}
@@ -463,9 +471,9 @@ func TestGenerateUsesServerVariableEnv(t *testing.T) {
 	}
 
 	binary := filepath.Join(outputDir, "bin", "templated")
-	stdout, stderr, err := runCLI(t, outputDir, []string{"TEMPLATED_SERVER_HOST=" + parsed.Host}, binary, "call", "ping.get")
+	stdout, stderr, err := runCLI(t, outputDir, []string{"TEMPLATED_SERVER_HOST=" + parsed.Host}, binary, "api", "ping.get")
 	if err != nil {
-		t.Fatalf("call failed: %v\nstderr=%s", err, stderr)
+		t.Fatalf("api failed: %v\nstderr=%s", err, stderr)
 	}
 	if !strings.Contains(stdout, `"ok": true`) {
 		t.Fatalf("expected response body in output, got: %s", stdout)
@@ -544,7 +552,7 @@ func TestGenerateStripsBrokenDiscriminatorMappingsFromRuntimeSpec(t *testing.T) 
 	}
 
 	binary := filepath.Join(outputDir, "bin", "callbacks")
-	stdout, stderr, err := runCLI(t, outputDir, nil, binary, "call", "callbacks.create", "--base-url", "https://example.com", "--body", `{"url":"http://localhost:3002/callback","platform":"web"}`, "--dry-run")
+	stdout, stderr, err := runCLI(t, outputDir, nil, binary, "api", "callbacks.create", "--base-url", "https://example.com", "--body", `{"url":"http://localhost:3002/callback","platform":"web"}`, "--dry-run")
 	if err != nil {
 		t.Fatalf("dry-run failed: %v\nstderr=%s", err, stderr)
 	}
@@ -592,7 +600,7 @@ func TestGenerateExecosSpecSmoke(t *testing.T) {
 		t.Fatalf("schema output did not include task body details: %s", stdout)
 	}
 
-	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "call", "tasks.list", "--base-url", "http://localhost:3000", "--params", `{"query":{"status":["todo"],"includeLinks":"true"}}`, "--dry-run")
+	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "api", "tasks.list", "--base-url", "http://localhost:3000", "--params", `{"query":{"status":["todo"],"includeLinks":"true"}}`, "--dry-run")
 	if err != nil {
 		t.Fatalf("dry-run failed: %v\nstderr=%s", err, stderr)
 	}
@@ -669,9 +677,9 @@ func TestGenerateSupportsQueryAPIKeyAuth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	stdout, stderr, err := runCLI(t, outputDir, []string{"QUERYAUTH_API_KEY=secret-token"}, binary, "call", "secure.get", "--base-url", server.URL)
+	stdout, stderr, err := runCLI(t, outputDir, []string{"QUERYAUTH_API_KEY=secret-token"}, binary, "api", "secure.get", "--base-url", server.URL)
 	if err != nil {
-		t.Fatalf("query-auth call failed: %v\nstderr=%s", err, stderr)
+		t.Fatalf("query-auth api failed: %v\nstderr=%s", err, stderr)
 	}
 	if !strings.Contains(stdout, `"ok": true`) {
 		t.Fatalf("expected successful response, got: %s", stdout)
@@ -734,7 +742,7 @@ func TestGenerateSupportsRuntimeAuthOverrides(t *testing.T) {
 		t.Fatalf("auth output did not include override metadata: %s", stdout)
 	}
 
-	_, stderr, err = runCLI(t, outputDir, []string{"OVERRIDEAUTH_OVERRIDES_JSON=" + overrides}, binary, "call", "secure.get", "--base-url", "https://example.com")
+	_, stderr, err = runCLI(t, outputDir, []string{"OVERRIDEAUTH_OVERRIDES_JSON=" + overrides}, binary, "api", "secure.get", "--base-url", "https://example.com")
 	if err == nil {
 		t.Fatalf("expected missing override auth to fail")
 	}
@@ -754,9 +762,9 @@ func TestGenerateSupportsRuntimeAuthOverrides(t *testing.T) {
 	stdout, stderr, err = runCLI(t, outputDir, []string{
 		"OVERRIDEAUTH_OVERRIDES_JSON=" + overrides,
 		"OVERRIDEAUTH_TOKEN=secret-token",
-	}, binary, "call", "secure.get", "--base-url", server.URL)
+	}, binary, "api", "secure.get", "--base-url", server.URL)
 	if err != nil {
-		t.Fatalf("override-auth call failed: %v\nstderr=%s", err, stderr)
+		t.Fatalf("override-auth api failed: %v\nstderr=%s", err, stderr)
 	}
 	if !strings.Contains(stdout, `"ok": true`) {
 		t.Fatalf("expected successful override-auth response, got: %s", stdout)
@@ -814,7 +822,7 @@ func TestGenerateSupportsConditionalRuntimeRequirements(t *testing.T) {
 	binary := filepath.Join(outputDir, "bin", "waitapi")
 	overrides := `{"operations":{"machines.wait":{"requirements":[{"when":[{"location":"query","name":"state","oneOf":["stopped","destroyed"]}],"require":[{"location":"query","name":"instance_id"}],"message":"query.instance_id is required when query.state is stopped or destroyed"}]}}}`
 
-	_, stderr, err := runCLI(t, outputDir, []string{"WAITAPI_OVERRIDES_JSON=" + overrides}, binary, "call", "machines.wait", "--base-url", "https://example.com", "--params", `{"query":{"state":"stopped"}}`, "--dry-run")
+	_, stderr, err := runCLI(t, outputDir, []string{"WAITAPI_OVERRIDES_JSON=" + overrides}, binary, "api", "machines.wait", "--base-url", "https://example.com", "--params", `{"query":{"state":"stopped"}}`, "--dry-run")
 	if err == nil {
 		t.Fatalf("expected conditional requirement to fail")
 	}
@@ -822,7 +830,7 @@ func TestGenerateSupportsConditionalRuntimeRequirements(t *testing.T) {
 		t.Fatalf("expected conditional requirement error, got: %s", stderr)
 	}
 
-	stdout, stderr, err := runCLI(t, outputDir, []string{"WAITAPI_OVERRIDES_JSON=" + overrides}, binary, "call", "machines.wait", "--base-url", "https://example.com", "--params", `{"query":{"state":"stopped","instance_id":"01HXYZ"}}`, "--dry-run")
+	stdout, stderr, err := runCLI(t, outputDir, []string{"WAITAPI_OVERRIDES_JSON=" + overrides}, binary, "api", "machines.wait", "--base-url", "https://example.com", "--params", `{"query":{"state":"stopped","instance_id":"01HXYZ"}}`, "--dry-run")
 	if err != nil {
 		t.Fatalf("expected conditional requirement with instance_id to pass: %v\nstderr=%s", err, stderr)
 	}
@@ -897,7 +905,7 @@ func TestGenerateKeepsPaginationTokensInQueryBlock(t *testing.T) {
 	}))
 	defer server.Close()
 
-	stdout, stderr, err := runCLI(t, outputDir, nil, binary, "call", "items.list", "--base-url", server.URL, "--page-all", "--page-limit", "2")
+	stdout, stderr, err := runCLI(t, outputDir, nil, binary, "api", "items.list", "--base-url", server.URL, "--page-all", "--page-limit", "2")
 	if err != nil {
 		t.Fatalf("page-all failed: %v\nstderr=%s", err, stderr)
 	}
@@ -997,12 +1005,12 @@ func TestGenerateSupportsAliasesAndPrioritizedParamExamples(t *testing.T) {
 		t.Fatalf("expected prioritized params example to include order_by, got: %s", stdout)
 	}
 
-	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "call", "users.list", "--base-url", "https://example.com", "--params", `{"query":{"limit":2}}`, "--dry-run")
+	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "api", "users.list", "--base-url", "https://example.com", "--params", `{"query":{"limit":2}}`, "--dry-run")
 	if err != nil {
-		t.Fatalf("call by alias failed: %v\nstderr=%s", err, stderr)
+		t.Fatalf("api by alias failed: %v\nstderr=%s", err, stderr)
 	}
 	if !strings.Contains(stdout, `"operation": "GetUserList"`) || !strings.Contains(stdout, `"url": "https://example.com/users?limit=2"`) {
-		t.Fatalf("unexpected dry-run output for alias call: %s", stdout)
+		t.Fatalf("unexpected dry-run output for alias api: %s", stdout)
 	}
 }
 
@@ -1083,9 +1091,9 @@ func TestGenerateSupportsSwagger2Specs(t *testing.T) {
 	}))
 	defer server.Close()
 
-	stdout, stderr, err = runCLI(t, outputDir, []string{"LEGACY_API_KEY=secret-token"}, binary, "call", "items.get", "--base-url", server.URL+"/v1", "--params", `{"path":{"id":"123"}}`)
+	stdout, stderr, err = runCLI(t, outputDir, []string{"LEGACY_API_KEY=secret-token"}, binary, "api", "items.get", "--base-url", server.URL+"/v1", "--params", `{"path":{"id":"123"}}`)
 	if err != nil {
-		t.Fatalf("call failed: %v\nstderr=%s", err, stderr)
+		t.Fatalf("api failed: %v\nstderr=%s", err, stderr)
 	}
 	if !strings.Contains(stdout, `"ok": true`) {
 		t.Fatalf("expected response body in output, got: %s", stdout)
@@ -1158,12 +1166,20 @@ func TestGenerateSupportsHTTPBasicAuth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	stdout, stderr, err := runCLI(t, outputDir, []string{"BASICAUTHAPI_CREDENTIALS=site-id:secret-key"}, binary, "call", "whoami.get", "--base-url", server.URL)
+	stdout, stderr, err := runCLI(t, outputDir, []string{"BASICAUTHAPI_CREDENTIALS=site-id:secret-key"}, binary, "whoami", "--base-url", server.URL)
 	if err != nil {
-		t.Fatalf("basic-auth call failed: %v\nstderr=%s", err, stderr)
+		t.Fatalf("basic-auth api failed: %v\nstderr=%s", err, stderr)
 	}
 	if !strings.Contains(stdout, `"ok": true`) {
 		t.Fatalf("expected response body in output, got: %s", stdout)
+	}
+
+	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "help")
+	if err != nil {
+		t.Fatalf("help failed: %v\nstderr=%s", err, stderr)
+	}
+	if !strings.Contains(stdout, `"name": "whoami"`) {
+		t.Fatalf("expected help output to advertise whoami, got: %s", stdout)
 	}
 }
 
@@ -1227,7 +1243,7 @@ func TestGenerateNormalizesAmbiguousScalarOneOfParameters(t *testing.T) {
 	}
 
 	binary := filepath.Join(outputDir, "bin", "identifierapi")
-	stdout, stderr, err := runCLI(t, outputDir, nil, binary, "call", "customers.get", "--base-url", "https://example.com", "--params", `{"path":{"identifier":"agent-cli-generator@example.invalid"}}`, "--dry-run")
+	stdout, stderr, err := runCLI(t, outputDir, nil, binary, "api", "customers.get", "--base-url", "https://example.com", "--params", `{"path":{"identifier":"agent-cli-generator@example.invalid"}}`, "--dry-run")
 	if err != nil {
 		t.Fatalf("expected ambiguous scalar oneOf param to validate: %v\nstderr=%s", err, stderr)
 	}
@@ -1437,9 +1453,9 @@ components:
 		t.Fatalf("expected schema output to include responses, got: %s", stdout)
 	}
 
-	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "call", "ping.get")
+	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "api", "ping.get")
 	if err != nil {
-		t.Fatalf("remote spec call failed: %v\nstderr=%s", err, stderr)
+		t.Fatalf("remote spec api failed: %v\nstderr=%s", err, stderr)
 	}
 	if !strings.Contains(stdout, `"ok": true`) {
 		t.Fatalf("expected successful response body, got: %s", stdout)
@@ -1794,9 +1810,9 @@ func TestGenerateRelaxesPostgRESTRequestValidation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "call", "tasks.create", "--base-url", server.URL, "--body", `{"title":"hello"}`)
+	stdout, stderr, err = runCLI(t, outputDir, nil, binary, "api", "tasks.create", "--base-url", server.URL, "--body", `{"title":"hello"}`)
 	if err != nil {
-		t.Fatalf("call failed: %v\nstderr=%s", err, stderr)
+		t.Fatalf("api failed: %v\nstderr=%s", err, stderr)
 	}
 	if !strings.Contains(stdout, `"ok": true`) {
 		t.Fatalf("expected response body in output, got: %s", stdout)
